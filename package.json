@@ -1,0 +1,41 @@
+{
+  "name": "polymarket-mm",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Prediction market bots for Polymarket (market making, arbitrage, rebate farming)",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "test": "echo \"No tests yet\" && exit 0",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "polymarket",
+    "prediction-markets",
+    "market-making",
+    "arbitrage",
+    "trading-bot"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@bitwarden/sdk-napi": "^1.0.0",
+    "@polymarket/clob-client": "^5.2.0",
+    "better-sqlite3": "^12.5.0",
+    "commander": "^14.0.0",
+    "date-fns": "^4.1.0",
+    "dotenv": "^16.5.0",
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0",
+    "viem": "^2.30.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

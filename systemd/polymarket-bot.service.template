@@ -1,0 +1,25 @@
+[Unit]
+Description=Polymarket MM Bot (Template)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/polymarket-mm
+ExecStart=/usr/bin/npx tsx src/index.ts
+Restart=always
+RestartSec=10
+StandardOutput=append:/path/to/polymarket-mm/logs/bot.log
+StandardError=append:/path/to/polymarket-mm/logs/bot-error.log
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target
+
+# ============================================================================
+# USAGE:
+# 1. Copy this file to ~/.config/systemd/user/polymarket-bot.service
+# 2. Edit WorkingDirectory and ExecStart paths
+# 3. Run: systemctl --user daemon-reload
+# 4. Run: systemctl --user enable --now polymarket-bot.service
+# 5. Check: systemctl --user status polymarket-bot.service
+# ============================================================================

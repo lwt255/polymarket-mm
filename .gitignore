@@ -1,0 +1,31 @@
+# Environment
+.env
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Logs
+logs/
+*.log
+
+# Cache
+cache/
+
+# Runtime state (machine-specific)
+state/
+
+# SQLite databases
+*.db
+*.sqlite
+
+# OS files
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
