@@ -120,6 +120,14 @@ async function resolveOutcome(slug: string, retries = 5): Promise<'UP' | 'DOWN' 
     return 'UNKNOWN';
 }
 
+/** Resolve using Chainlink: UP wins if closing price >= opening price */
+function resolveFromChainlink(market: any, chainlink: ChainlinkFeed, openPrice: number): 'UP' | 'DOWN' | 'UNKNOWN' {
+    const closePrice = chainlink.getPrice();
+    if (openPrice <= 0 || closePrice <= 0) return 'UNKNOWN';
+    log(`  Chainlink resolution: open=$${openPrice.toFixed(2)} close=$${closePrice.toFixed(2)}`);
+    return closePrice >= openPrice ? 'UP' : 'DOWN';
+}
+
 // --- Main Bot Logic ---
 
 async function runOneMarket(params: ArbBotParams, chainlink: ChainlinkFeed): Promise<MarketResult> {
@@ -134,9 +142,14 @@ async function runOneMarket(params: ArbBotParams, chainlink: ChainlinkFeed): Pro
     }
 
     const endTime = new Date(market.endDate).getTime();
+    const startTime = endTime - 300000; // 5-min markets
     const slug = market.slug;
     log(`\n=== Market: ${slug} ===`);
     log(`  End: ${new Date(endTime).toISOString()}`);
+
+    // Capture opening Chainlink price (used for resolution)
+    const openPrice = chainlink.getPrice();
+    log(`  Chainlink open: $${openPrice.toFixed(2)}`);
 
     // Entry delay
     if (params.entryDelaySeconds > 0) {
@@ -251,15 +264,20 @@ async function runOneMarket(params: ArbBotParams, chainlink: ChainlinkFeed): Pro
     }
 
     // Wait for resolution
-    // Wait for market to end, then extra buffer for resolution to propagate
     const msUntilEnd = endTime - Date.now();
     if (msUntilEnd > 0) {
         log(`  Waiting ${(msUntilEnd / 1000).toFixed(0)}s for market to end...`);
         await sleep(msUntilEnd);
     }
-    log(`  Waiting 10s for resolution to propagate...`);
-    await sleep(10000);
-    const outcome = await resolveOutcome(slug);
+
+    // Primary resolution: Chainlink close vs open price (instant, no API lag)
+    let outcome = resolveFromChainlink(market, chainlink, openPrice);
+    if (outcome === 'UNKNOWN') {
+        // Fallback: wait for Gamma API to update (can take 1-3 minutes)
+        log(`  Chainlink resolution unclear, waiting 90s for Gamma API...`);
+        await sleep(90000);
+        outcome = await resolveOutcome(slug);
+    }
     log(`  Outcome: ${outcome}`);
 
     // Calculate P&L
