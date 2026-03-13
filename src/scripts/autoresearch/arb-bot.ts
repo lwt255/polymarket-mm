@@ -93,18 +93,29 @@ function getTokenIds(market: any): { upToken: string; downToken: string } | null
     }
 }
 
-async function resolveOutcome(slug: string, retries = 3): Promise<'UP' | 'DOWN' | 'UNKNOWN'> {
+async function resolveOutcome(slug: string, retries = 5): Promise<'UP' | 'DOWN' | 'UNKNOWN'> {
     for (let i = 0; i < retries; i++) {
         const data = await fetchJSON(`${GAMMA}/markets?slug=${slug}`);
         if (data?.[0]) {
+            // Try outcomePrices first (resolved markets)
             const prices = JSON.parse(data[0].outcomePrices || '[]').map(Number);
             const outcomes = JSON.parse(data[0].outcomes || '[]');
             const upIdx = outcomes.findIndex((o: string) => o.toUpperCase() === 'UP');
             const downIdx = outcomes.findIndex((o: string) => o.toUpperCase() === 'DOWN');
             if (upIdx !== -1 && prices[upIdx] >= 0.95) return 'UP';
             if (downIdx !== -1 && prices[downIdx] >= 0.95) return 'DOWN';
+
+            // Also check if market shows resolved status
+            if (data[0].resolved) {
+                // Resolved but prices not extreme — check which side won
+                if (upIdx !== -1 && downIdx !== -1) {
+                    if (prices[upIdx] > prices[downIdx]) return 'UP';
+                    if (prices[downIdx] > prices[upIdx]) return 'DOWN';
+                }
+            }
         }
-        if (i < retries - 1) await sleep(3000);
+        log(`    Resolution attempt ${i + 1}/${retries}: not yet resolved`);
+        if (i < retries - 1) await sleep(5000);
     }
     return 'UNKNOWN';
 }
