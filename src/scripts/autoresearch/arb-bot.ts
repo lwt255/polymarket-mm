@@ -408,10 +408,26 @@ async function main() {
 
     const startTime = Date.now();
     const endTime = startTime + durationMinutes * 60 * 1000;
+    // Hard timeout: 10 min past expected end (safety net for hangs)
+    const hardTimeout = setTimeout(() => {
+        log(`[FATAL] Hard timeout reached, forcing exit`);
+        chainlink.disconnect();
+        const summary = summarize(markets, startTime);
+        const result: DryRunResult = { params: PARAMS, markets, summary };
+        console.log(JSON.stringify(result));
+        process.exit(0);
+    }, (durationMinutes + 10) * 60 * 1000);
+
     const markets: MarketResult[] = [];
     let consecutiveApiFailures = 0;
 
     while (Date.now() < endTime) {
+        // Check Chainlink health — if stale > 2 min, feed is dead
+        if (chainlink.getTimestamp() > 0 && Date.now() - chainlink.getTimestamp() > 120000) {
+            log(`[WARN] Chainlink feed dead (${((Date.now() - chainlink.getTimestamp()) / 1000).toFixed(0)}s stale), ending early`);
+            break;
+        }
+
         const result = await runOneMarket(PARAMS, chainlink);
         markets.push(result);
 
@@ -434,6 +450,8 @@ async function main() {
             await sleep(waitMs);
         }
     }
+
+    clearTimeout(hardTimeout);
 
     chainlink.disconnect();
 
