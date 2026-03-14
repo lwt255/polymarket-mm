@@ -37,8 +37,9 @@ export function evaluate(result: DryRunResult, previousScore: number): EvalResul
         };
     }
 
-    // Auto-reject: catastrophic loss
-    if (summary.netPnlCents < -50) {
+    // Auto-reject: catastrophic loss (relaxed from -50¢ — single-fill losses
+    // are expected while the AI explores offset/timing space)
+    if (summary.netPnlCents < -200) {
         return {
             score: computeScore(summary),
             verdict: 'rejected',

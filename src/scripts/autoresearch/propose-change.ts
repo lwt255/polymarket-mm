@@ -22,10 +22,37 @@ export interface ProposedChange {
     hypothesis: string;
 }
 
+export interface ClaudeUsage {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    totalCostUsd: number;
+    durationMs: number;
+}
+
 function readLastNLines(filePath: string, n: number): string {
     if (!existsSync(filePath)) return '(no history yet)';
     const lines = readFileSync(filePath, 'utf8').trim().split('\n');
     return lines.slice(-n).join('\n');
+}
+
+/** Format experiment history as a readable table for Claude */
+function formatHistoryTable(historyPath: string, maxEntries: number): string {
+    if (!existsSync(historyPath)) return '(no history yet)';
+    const lines = readFileSync(historyPath, 'utf8').trim().split('\n').filter(Boolean);
+    if (lines.length === 0) return '(no history yet)';
+
+    const entries = lines.slice(-maxEntries).map(l => JSON.parse(l));
+    const header = '| # | offset | cancel | shares | entry | exit | spread | overround | depth | fillThresh | traded | both | single | pnl¢ | score | verdict |';
+    const sep =    '|---|--------|--------|--------|-------|------|--------|-----------|-------|------------|--------|------|--------|------|-------|---------|';
+    const rows = entries.map(d => {
+        const p = d.params;
+        const s = d.summary || {};
+        return `| ${d.iteration} | ${p.upBidOffset} | ${p.cancelOnSingleFill} | ${p.sharesPerSide} | ${p.entryDelaySeconds}s | ${p.exitBeforeEndSeconds}s | ${p.minSpreadCents} | ${p.maxOverroundCents} | ${p.minBookDepthUsd} | ${p.fillThresholdCents} | ${s.marketsTraded ?? '?'} | ${s.bothFills ?? '?'}(${((s.bothFillRate || 0) * 100).toFixed(0)}%) | ${s.singleFills ?? '?'} | ${(s.netPnlCents ?? 0).toFixed(0)} | ${d.score.toFixed(0)} | ${d.verdict} |`;
+    });
+
+    return [header, sep, ...rows].join('\n');
 }
 
 export function buildPrompt(currentParams: ArbBotParams, historyPath: string): string {
@@ -34,7 +61,7 @@ export function buildPrompt(currentParams: ArbBotParams, historyPath: string): s
         ? readFileSync(playbookPath, 'utf8')
         : '(playbook not found)';
 
-    const history = readLastNLines(historyPath, 20);
+    const historyTable = formatHistoryTable(historyPath, 30);
 
     return `You are an AI researcher optimizing a paper-trading arbitrage bot for Polymarket BTC 5-minute binary markets.
 
@@ -42,14 +69,12 @@ export function buildPrompt(currentParams: ArbBotParams, historyPath: string): s
 ${playbook}
 
 ## Current Parameters
-\`\`\`typescript
+\`\`\`json
 ${JSON.stringify(currentParams, null, 2)}
 \`\`\`
 
-## Recent Experiment History (last 20)
-\`\`\`
-${history}
-\`\`\`
+## Experiment History
+${historyTable}
 
 ## Your Task
 1. Analyze the experiment history to understand what's been tried and what worked.
@@ -58,22 +83,8 @@ ${history}
 
 HYPOTHESIS: <one-line explanation of what you're testing and why>
 PARAMS:
-\`\`\`typescript
-{
-  "upBidOffset": 0.03,
-  "downBidOffset": 0.03,
-  "useSymmetricPricing": true,
-  "entryDelaySeconds": 10,
-  "exitBeforeEndSeconds": 15,
-  "minSpreadCents": 1,
-  "maxOverroundCents": 4,
-  "minBookDepthUsd": 20,
-  "sharesPerSide": 20,
-  "maxSingleSideLossCents": 30,
-  "cancelOnSingleFill": true,
-  "fillThresholdCents": 0,
-  "partialFillRatio": 1.0
-}
+\`\`\`json
+${JSON.stringify(currentParams, null, 2)}
 \`\`\`
 
 Important: Change only 1-2 parameters at a time. Keep all fields present. Stay within valid ranges.`;
@@ -122,22 +133,25 @@ export function validateParams(params: ArbBotParams): string[] {
     return errors;
 }
 
-export async function proposeChange(currentParams: ArbBotParams, historyPath: string): Promise<ProposedChange> {
+export async function proposeChange(
+    currentParams: ArbBotParams,
+    historyPath: string,
+): Promise<{ change: ProposedChange; usage: ClaudeUsage }> {
     const prompt = buildPrompt(currentParams, historyPath);
 
-    let response: string;
-    try {
-        // Pipe prompt via stdin for long prompts
-        // Must unset CLAUDECODE to avoid nested-session detection
-        const env = { ...process.env };
-        delete env.CLAUDECODE;
+    // Must unset CLAUDECODE to avoid nested-session detection
+    const env = { ...process.env };
+    delete env.CLAUDECODE;
 
-        response = execSync(
-            `claude -p --model sonnet --no-session-persistence --tools "" --permission-mode default`,
+    let rawOutput: string;
+    try {
+        // Use --output-format json to get usage stats alongside the response
+        rawOutput = execSync(
+            `claude -p --output-format json --model sonnet --no-session-persistence --tools "" --permission-mode default`,
             {
                 input: prompt,
                 encoding: 'utf8',
-                timeout: 60000,
+                timeout: 90000,
                 maxBuffer: 1024 * 1024,
                 env,
             }
@@ -146,9 +160,34 @@ export async function proposeChange(currentParams: ArbBotParams, historyPath: st
         throw new Error(`Claude CLI failed: ${err.message}`);
     }
 
-    const parsed = parseResponse(response);
+    // Parse the JSON envelope
+    let envelope: any;
+    try {
+        envelope = JSON.parse(rawOutput);
+    } catch {
+        throw new Error(`Could not parse Claude CLI JSON output:\n${rawOutput.slice(0, 500)}`);
+    }
+
+    if (envelope.is_error) {
+        throw new Error(`Claude CLI returned error: ${envelope.result}`);
+    }
+
+    // Extract usage
+    const u = envelope.usage || {};
+    const usage: ClaudeUsage = {
+        inputTokens: u.input_tokens || 0,
+        outputTokens: u.output_tokens || 0,
+        cacheReadTokens: u.cache_read_input_tokens || 0,
+        cacheCreationTokens: u.cache_creation_input_tokens || 0,
+        totalCostUsd: envelope.total_cost_usd || 0,
+        durationMs: envelope.duration_ms || 0,
+    };
+
+    // Parse the actual response text
+    const responseText = envelope.result || '';
+    const parsed = parseResponse(responseText);
     if (!parsed) {
-        throw new Error(`Could not parse Claude response:\n${response.slice(0, 500)}`);
+        throw new Error(`Could not parse Claude response:\n${responseText.slice(0, 500)}`);
     }
 
     const errors = validateParams(parsed.params);
@@ -156,7 +195,7 @@ export async function proposeChange(currentParams: ArbBotParams, historyPath: st
         throw new Error(`Invalid params from Claude:\n${errors.join('\n')}`);
     }
 
-    return parsed;
+    return { change: parsed, usage };
 }
 
 // --- CLI test ---
@@ -166,10 +205,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
     console.log('Calling Claude CLI for parameter suggestion...');
     try {
-        const change = await proposeChange(currentParams, historyPath);
+        const { change, usage } = await proposeChange(currentParams, historyPath);
         console.log(`\nHypothesis: ${change.hypothesis}`);
         console.log(`\nProposed params:`);
         console.log(JSON.stringify(change.params, null, 2));
+        console.log(`\nUsage: ${usage.inputTokens} in + ${usage.outputTokens} out | Cache: ${usage.cacheReadTokens} read | Cost: $${usage.totalCostUsd.toFixed(4)} | Time: ${usage.durationMs}ms`);
     } catch (err) {
         console.error('Error:', err);
         process.exit(1);

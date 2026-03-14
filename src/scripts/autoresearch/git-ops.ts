@@ -59,8 +59,20 @@ export function commitChange(message: string): string {
 
 /** Revert the last commit (failed experiment) */
 export function revertLastCommit(): void {
-    git('revert HEAD --no-edit');
-    console.log('[git] Reverted last commit');
+    try {
+        git('revert HEAD --no-edit');
+        console.log('[git] Reverted last commit');
+    } catch (err: any) {
+        console.error(`[git] Revert failed: ${err.message}`);
+        // Fallback: reset the params file to previous commit's version
+        try {
+            git(`checkout HEAD~1 -- ${PARAMS_FILE}`);
+            git(`commit -m "revert: reset params after failed revert"`);
+            console.log('[git] Recovered params via checkout');
+        } catch {
+            console.error('[git] Recovery also failed — manual intervention needed');
+        }
+    }
 }
 
 /** Get current commit hash */

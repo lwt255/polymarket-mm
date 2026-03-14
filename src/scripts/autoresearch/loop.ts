@@ -10,7 +10,7 @@
  * 6. Append to experiment-history.jsonl
  * 7. Loop
  *
- * Usage: npx tsx src/scripts/autoresearch/loop.ts --iterations 20 --duration 60
+ * Usage: npx tsx src/scripts/autoresearch/loop.ts --iterations 20 --duration 30
  */
 
 import { spawn } from 'node:child_process';
@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { DryRunResult, ExperimentRecord, ArbBotParams } from './types.js';
+import type { ClaudeUsage } from './propose-change.js';
 import { evaluate, computeScore } from './evaluate.js';
 import { proposeChange } from './propose-change.js';
 import {
@@ -55,22 +56,33 @@ export const PARAMS: ArbBotParams = ${JSON.stringify(params, null, 4)};
 
 function readCurrentParams(): ArbBotParams {
     const content = readFileSync(PARAMS_FILE, 'utf8');
-    // Extract the object literal from the TS file
     const match = content.match(/export const PARAMS: ArbBotParams = ({[\s\S]*});/);
     if (!match) throw new Error('Could not parse current params file');
 
-    // Convert TS object literal to valid JSON:
-    // 1. Remove comments  2. Quote unquoted keys  3. Remove trailing commas
     const jsonStr = match[1]
-        .replace(/\/\/.*$/gm, '')                    // strip line comments
-        .replace(/\/\*[\s\S]*?\*\//g, '')            // strip block comments
-        .replace(/(\w+)\s*:/g, '"$1":')              // quote keys
-        .replace(/,(\s*[}\]])/g, '$1');              // remove trailing commas
+        .replace(/\/\/.*$/gm, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(\w+)\s*:/g, '"$1":')
+        .replace(/,(\s*[}\]])/g, '$1');
     return JSON.parse(jsonStr);
 }
 
+// Track active child process for cleanup on shutdown
+let activeChild: ReturnType<typeof spawn> | null = null;
+
 function runBot(durationMinutes: number): Promise<DryRunResult> {
+    // Hard timeout: duration + 15 min safety margin
+    const timeoutMs = (durationMinutes + 15) * 60 * 1000;
+
     return new Promise((resolve, reject) => {
+        let settled = false;
+        const settle = (fn: typeof resolve | typeof reject, val: any) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            fn(val);
+        };
+
         const child = spawn('npx', ['tsx', BOT_SCRIPT, '--duration', String(durationMinutes)], {
             cwd: REPO_ROOT,
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -84,32 +96,39 @@ function runBot(durationMinutes: number): Promise<DryRunResult> {
         child.stderr.on('data', (data) => {
             const line = data.toString();
             stderr += line;
-            process.stderr.write(line); // forward bot logs
+            process.stderr.write(line);
         });
 
-        // Store child ref for cleanup
-        (runBot as any)._child = child;
+        activeChild = child;
+
+        // Safety timeout — kill bot if it hangs beyond expected duration
+        const timer = setTimeout(() => {
+            log(`Bot exceeded timeout (${durationMinutes + 15}min), killing...`);
+            child.kill('SIGTERM');
+            setTimeout(() => {
+                if (!settled) child.kill('SIGKILL');
+            }, 5000);
+        }, timeoutMs);
 
         child.on('close', (code) => {
-            (runBot as any)._child = null;
+            activeChild = null;
             if (code !== 0) {
-                reject(new Error(`Bot exited with code ${code}\nStderr: ${stderr.slice(-500)}`));
+                settle(reject, new Error(`Bot exited with code ${code}\nStderr: ${stderr.slice(-500)}`));
                 return;
             }
             try {
-                // stdout may have non-JSON lines; find the last JSON line
                 const lines = stdout.trim().split('\n');
                 const jsonLine = lines.reverse().find(l => l.startsWith('{'));
                 if (!jsonLine) throw new Error('No JSON output from bot');
-                resolve(JSON.parse(jsonLine));
+                settle(resolve, JSON.parse(jsonLine));
             } catch (err) {
-                reject(new Error(`Failed to parse bot output: ${err}\nStdout: ${stdout.slice(-500)}`));
+                settle(reject, new Error(`Failed to parse bot output: ${err}\nStdout: ${stdout.slice(-500)}`));
             }
         });
 
         child.on('error', (err) => {
-            (runBot as any)._child = null;
-            reject(err);
+            activeChild = null;
+            settle(reject, err);
         });
     });
 }
@@ -126,8 +145,8 @@ async function main() {
     const durIdx = args.indexOf('--duration');
     const resetIdx = args.indexOf('--reset-history');
 
-    const maxIterations = iterIdx !== -1 ? parseInt(args[iterIdx + 1] || '10') : 10;
-    const botDuration = durIdx !== -1 ? parseInt(args[durIdx + 1] || '60') : 60;
+    const maxIterations = iterIdx !== -1 ? parseInt(args[iterIdx + 1] || '20') : 20;
+    const botDuration = durIdx !== -1 ? parseInt(args[durIdx + 1] || '30') : 30;
 
     if (resetIdx !== -1 && existsSync(HISTORY_FILE)) {
         writeFileSync(HISTORY_FILE, '');
@@ -146,17 +165,35 @@ async function main() {
     let consecutiveFailures = 0;
     let stopped = false;
 
+    // Cumulative usage tracking
+    let totalUsage = {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        costUsd: 0,
+        claudeCalls: 0,
+    };
+
     // Graceful shutdown
     const cleanup = () => {
         if (stopped) return;
         stopped = true;
         log('Shutting down...');
-        const child = (runBot as any)._child;
-        if (child) {
-            child.kill('SIGTERM');
+        logUsageSummary();
+        if (activeChild) {
+            activeChild.kill('SIGTERM');
             log('Killed bot child process');
         }
     };
+
+    const logUsageSummary = () => {
+        log(`\n=== Claude Usage Summary ===`);
+        log(`  Calls: ${totalUsage.claudeCalls}`);
+        log(`  Input tokens: ${totalUsage.inputTokens.toLocaleString()} (cache read: ${totalUsage.cacheReadTokens.toLocaleString()})`);
+        log(`  Output tokens: ${totalUsage.outputTokens.toLocaleString()}`);
+        log(`  Total cost: $${totalUsage.costUsd.toFixed(4)}`);
+    };
+
     process.on('SIGINT', cleanup);
     process.on('SIGTERM', cleanup);
 
@@ -167,10 +204,22 @@ async function main() {
 
         // Step 1: Get proposed change from Claude
         let proposed;
+        let iterUsage: ClaudeUsage | null = null;
         try {
             const currentParams = readCurrentParams();
-            proposed = await proposeChange(currentParams, HISTORY_FILE);
+            const result = await proposeChange(currentParams, HISTORY_FILE);
+            proposed = result.change;
+            iterUsage = result.usage;
+
+            // Log per-iteration usage
+            totalUsage.inputTokens += iterUsage.inputTokens;
+            totalUsage.outputTokens += iterUsage.outputTokens;
+            totalUsage.cacheReadTokens += iterUsage.cacheReadTokens;
+            totalUsage.costUsd += iterUsage.totalCostUsd;
+            totalUsage.claudeCalls++;
+
             log(`Hypothesis: ${proposed.hypothesis}`);
+            log(`Claude usage: ${iterUsage.inputTokens} in + ${iterUsage.outputTokens} out | $${iterUsage.totalCostUsd.toFixed(4)} | ${iterUsage.durationMs}ms`);
             consecutiveFailures = 0;
         } catch (err: any) {
             log(`Claude CLI error: ${err.message}`);
@@ -216,6 +265,9 @@ async function main() {
         const evalResult = evaluate(result, currentScore);
         log(`Score: ${evalResult.score.toFixed(1)} | Verdict: ${evalResult.verdict} | ${evalResult.reason}`);
 
+        // Capture before updating
+        const prevScore = currentScore;
+
         // Step 5: Keep or revert
         if (evalResult.verdict === 'rejected') {
             revertLastCommit();
@@ -237,7 +289,7 @@ async function main() {
             hypothesis: proposed.hypothesis,
             params: proposed.params,
             score: evalResult.score,
-            previousScore: currentScore,
+            previousScore: prevScore,
             accepted: evalResult.verdict !== 'rejected',
             verdict: evalResult.verdict,
             summary: result.summary,
@@ -250,6 +302,7 @@ async function main() {
     log(`Branch: ${branch}`);
     log(`Final score: ${currentScore.toFixed(1)}`);
     log(`History: ${HISTORY_FILE}`);
+    logUsageSummary();
 }
 
 main().catch((err) => {

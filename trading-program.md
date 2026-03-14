@@ -41,7 +41,7 @@ score = 2.0 * netPnlCents
       - 0.8 * singleFillLossCents
 ```
 
-**Auto-reject if**: marketsTraded < 3, netPnlCents < -50, bothFillRate < 5%
+**Auto-reject if**: marketsTraded < 3, netPnlCents < -200, bothFillRate < 5%
 
 ## Experimentation Guidelines
 
@@ -60,3 +60,28 @@ score = 2.0 * netPnlCents
 - The edge comes from getting filled at favorable limit prices, not from taking
 - High-volatility moments create more fill opportunities
 - Markets transition every 5 minutes — there's always a fresh opportunity
+
+## Findings from Run 1 (10 iterations, 60min each)
+
+These are proven insights — use them to guide your exploration.
+
+### What We Know Works
+- **cancelOnSingleFill=false is critical.** With it on, the bot got 0% both-fill rate across 6+ markets. Turning it off immediately jumped to 57-86% both-fill rate. This was the single biggest unlock (iteration 3).
+- **Offset 0.02 is the sweet spot so far.** 0.03 was too wide (low fill rate), 0.05 was way too wide. 0.02 gives 57-86% both-fill rate.
+- **Shares 15 performs well.** Reducing from 20 to 15 didn't hurt fill rate and reduced single-fill exposure.
+
+### What Still Needs Exploring
+The AI only touched 4 of 13 parameters in run 1. These are **unexplored and high-potential**:
+- **entryDelaySeconds** (currently 10s) — waiting longer might let spreads widen, increasing fill odds
+- **exitBeforeEndSeconds** (currently 15s) — adjusting could change which price action we capture
+- **minSpreadCents** (currently 1) — filtering for wider spreads could improve per-trade profitability
+- **maxOverroundCents** (currently 4) — loosening could add more trading opportunities
+- **minBookDepthUsd** (currently 20) — adjusting affects which markets we enter
+- **fillThresholdCents** (currently 0) — adding a buffer might simulate more conservative fills
+- **useSymmetricPricing** (currently true) — asymmetric offsets could exploit directional biases
+
+### The Core Challenge
+Both-fill profit per market is thin (~2-4¢ when offset=0.02). Single-fill losses (~15% of markets) can wipe out multiple both-fill wins. The AI needs to find parameter combos that either:
+1. Increase both-fill rate above 85%+ to overwhelm occasional losses, OR
+2. Reduce single-fill loss severity (via timing, filtering, or position sizing), OR
+3. Find a wider offset that still gets decent fills (more profit per both-fill)
