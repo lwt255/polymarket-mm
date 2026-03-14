@@ -488,6 +488,10 @@ async function main() {
 
     // Output JSON to stdout (captured by loop)
     console.log(JSON.stringify(result));
+
+    // Force exit — ChainlinkFeed's onclose handler sets a reconnect timer
+    // that keeps the event loop alive even after disconnect()
+    process.exit(0);
 }
 
 main().catch((err) => {
