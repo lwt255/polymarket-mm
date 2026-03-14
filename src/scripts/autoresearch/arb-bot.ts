@@ -35,6 +35,19 @@ function sleep(ms: number): Promise<void> {
     return new Promise((r) => setTimeout(r, ms));
 }
 
+/** Sleep in 10s chunks, checking Chainlink health each chunk. Throws if feed is dead. */
+async function sleepWithHealthCheck(ms: number, chainlink: ChainlinkFeed): Promise<void> {
+    const chunkMs = 10000;
+    let remaining = ms;
+    while (remaining > 0) {
+        await sleep(Math.min(remaining, chunkMs));
+        remaining -= chunkMs;
+        if (chainlink.getTimestamp() > 0 && Date.now() - chainlink.getTimestamp() > 120000) {
+            throw new Error('Chainlink feed stale during sleep');
+        }
+    }
+}
+
 async function getFullBook(tokenId: string): Promise<BookSnapshot> {
     const raw = await fetchJSON(`${CLOB}/book?token_id=${tokenId}`);
     if (!raw) return { bestBid: 0, bestAsk: 1, spread: 1, midpoint: 0.5, bidDepth: 0, askDepth: 0, bids: [], asks: [] };
@@ -131,6 +144,15 @@ function resolveFromChainlink(market: any, chainlink: ChainlinkFeed, openPrice: 
 // --- Main Bot Logic ---
 
 async function runOneMarket(params: ArbBotParams, chainlink: ChainlinkFeed): Promise<MarketResult> {
+    try {
+        return await _runOneMarket(params, chainlink);
+    } catch (err: any) {
+        log(`  [ERROR] ${err.message}`);
+        return makeSkippedResult(err.message);
+    }
+}
+
+async function _runOneMarket(params: ArbBotParams, chainlink: ChainlinkFeed): Promise<MarketResult> {
     const market = await findMarketWithRetry();
     if (!market) {
         return makeSkippedResult('No market found');
@@ -267,7 +289,7 @@ async function runOneMarket(params: ArbBotParams, chainlink: ChainlinkFeed): Pro
     const msUntilEnd = endTime - Date.now();
     if (msUntilEnd > 0) {
         log(`  Waiting ${(msUntilEnd / 1000).toFixed(0)}s for market to end...`);
-        await sleep(msUntilEnd);
+        await sleepWithHealthCheck(msUntilEnd, chainlink);
     }
 
     // Primary resolution: Chainlink close vs open price (instant, no API lag)
@@ -447,7 +469,7 @@ async function main() {
         const waitMs = nextBoundary - now + 2000; // +2s buffer for market to appear
         if (waitMs > 0 && Date.now() + waitMs < endTime) {
             log(`\nWaiting ${(waitMs / 1000).toFixed(0)}s for next market...`);
-            await sleep(waitMs);
+            await sleepWithHealthCheck(waitMs, chainlink);
         }
     }
 
