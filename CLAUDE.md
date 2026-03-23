@@ -5,9 +5,9 @@
 ---
 
 ## ⚡ Current Context
-- **Current State**: Bot Stopped; Collector Running Locally With Raw / Strategy / Rejected Dataset Split
-- **Last Commit**: `d012931` — fix: collector throughput and data-quality guards
-- **Recent Changes**: Fixed collector under-sampling to reach the true 64 markets/hour ceiling, added liquidity profiling plus a tradable `T-120` gate, and split outputs into `pricing-data.raw.jsonl` (2,193 rows), `pricing-data.jsonl` strategy-grade (2,144 rows), and `pricing-data.rejected.jsonl` (16 rows). Empty early books now appear to be a real market-liquidity constraint rather than a collector failure.
+- **Current State**: Bot Stopped; Collector Running Locally Under A Raw-First Research Policy
+- **Last Commit**: `c110e2f` — docs: journal 2026-03-23 — dataset split and liquidity
+- **Recent Changes**: Collector still targets the true 64 markets/hour ceiling, but the data policy was relaxed: `pricing-data.raw.jsonl` is now the broad telemetry corpus with quality flags, `pricing-data.jsonl` stays the strategy-grade T-120 subset, and `pricing-data.rejected.jsonl` is reserved for genuinely malformed records. Current local counts are 2,345 raw / 2,232 strategy-grade / 0 rejected after folding older strict rejects back into raw telemetry.
 
 ---
 
@@ -33,7 +33,7 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 
 ### Scripts
 - **[scripts/journal-entry.sh](scripts/journal-entry.sh)** - Journal helper commands
-- **[src/scripts/pricing-collector.ts](src/scripts/pricing-collector.ts)** - Live multi-crypto pricing collector with quality rejection
+- **[src/scripts/pricing-collector.ts](src/scripts/pricing-collector.ts)** - Live multi-crypto pricing collector with raw-first quality labeling
 - **[src/scripts/pricing-data-utils.ts](src/scripts/pricing-data-utils.ts)** - Shared liquidity classification and tradability helpers
 
 ---
