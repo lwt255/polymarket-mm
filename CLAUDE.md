@@ -5,9 +5,9 @@
 ---
 
 ## ⚡ Current Context
-- **Current State**: Bot Stopped; Collector Running Locally With Data-Quality Guards
-- **Last Commit**: Docs: Update context with Meticulous Profit Discovery (+32.4% Annualized)
-- **Recent Changes**: Fixed pricing collector throughput and trust issues. True collection ceiling is 64 markets/hour (not 96), under-sampling bug removed, bad rows now quarantine to `pricing-data.rejected.jsonl`, and the main dataset was cleaned to 2,101 accepted / 12 rejected rows.
+- **Current State**: Bot Stopped; Collector Running Locally With Raw / Strategy / Rejected Dataset Split
+- **Last Commit**: `d012931` — fix: collector throughput and data-quality guards
+- **Recent Changes**: Fixed collector under-sampling to reach the true 64 markets/hour ceiling, added liquidity profiling plus a tradable `T-120` gate, and split outputs into `pricing-data.raw.jsonl` (2,193 rows), `pricing-data.jsonl` strategy-grade (2,144 rows), and `pricing-data.rejected.jsonl` (16 rows). Empty early books now appear to be a real market-liquidity constraint rather than a collector failure.
 
 ---
 
@@ -34,6 +34,7 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 ### Scripts
 - **[scripts/journal-entry.sh](scripts/journal-entry.sh)** - Journal helper commands
 - **[src/scripts/pricing-collector.ts](src/scripts/pricing-collector.ts)** - Live multi-crypto pricing collector with quality rejection
+- **[src/scripts/pricing-data-utils.ts](src/scripts/pricing-data-utils.ts)** - Shared liquidity classification and tradability helpers
 
 ---
 
