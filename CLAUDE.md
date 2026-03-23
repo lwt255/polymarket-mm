@@ -5,9 +5,9 @@
 ---
 
 ## ⚡ Current Context
-- **Current State**: Bots Active on Pi (Remote)
+- **Current State**: Bot Stopped; Collector Running Locally With Data-Quality Guards
 - **Last Commit**: Docs: Update context with Meticulous Profit Discovery (+32.4% Annualized)
-- **Recent Changes**: Completed meticulous profit verification. Selective Sniper Strategy proven at 6.33% Monthly (76% Annualized) on specific markets and 8.10% Aggregate ROI over 90 days. Infrastructure fully updated for live simulation.
+- **Recent Changes**: Fixed pricing collector throughput and trust issues. True collection ceiling is 64 markets/hour (not 96), under-sampling bug removed, bad rows now quarantine to `pricing-data.rejected.jsonl`, and the main dataset was cleaned to 2,101 accepted / 12 rejected rows.
 
 ---
 
@@ -27,11 +27,13 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 ## 📚 Documentation Index
 
 ### Core References
+- **[AGENTS.md](AGENTS.md)** - Mirror of this file for Codex/other agents
 - **[journal/README.md](journal/README.md)** - Journal system usage
 - **[.env.example](.env.example)** - Environment variable template
 
 ### Scripts
 - **[scripts/journal-entry.sh](scripts/journal-entry.sh)** - Journal helper commands
+- **[src/scripts/pricing-collector.ts](src/scripts/pricing-collector.ts)** - Live multi-crypto pricing collector with quality rejection
 
 ---
 
@@ -172,7 +174,8 @@ const order = await client.createOrder({
 ### When Context is Limited
 1. **Read this file first** for project overview and navigation
 2. **Check journal/** for recent activity and decisions
-3. **Reference specific docs** instead of duplicating content
+3. **Keep `CLAUDE.md` and `AGENTS.md` mirrored** when updating shared agent context
+4. **Reference specific docs** instead of duplicating content
 
 ### Key Strategies to Explore
 1. **Arbitrage**: If YES + NO prices < $1.00, buy both for guaranteed profit
@@ -183,6 +186,7 @@ const order = await client.createOrder({
 - This is **experimental** - no live trading yet
 - Always test strategies with backtests/simulation first
 - Document all findings in journal
+- Treat collector-derived win rates as **provisional** after any sampling or data-quality bug until enough clean replacement data is collected
 
 ---
 
@@ -198,4 +202,4 @@ const order = await client.createOrder({
 
 ---
 
-**Last Updated**: January 16, 2026
+**Last Updated**: March 23, 2026
