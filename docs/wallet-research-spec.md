@@ -163,6 +163,7 @@ Outputs:
 Current implementation note:
 - before deeper intent reconstruction, normalize matched enriched rows into tx-level events and wallet-execution events with `src/scripts/wallet-tx-normalizer.ts`
 - use normalized execution events as the default unit when a public feed transaction hash clearly represents a multi-row paired execution
+- rerun primitive scoring on `wallet-wallet-executions.normalized.jsonl` before drawing conclusions from raw-row primitive reports; `src/scripts/wallet-normalized-primitive-report.ts` is the current normalized pass
 
 ### Phase 4: Behavior Primitive Analysis
 
