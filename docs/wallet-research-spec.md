@@ -76,6 +76,10 @@ Any discovered pattern must answer all of these:
 
 If not, the pattern is interesting but non-actionable.
 
+Current implementation note:
+- `src/scripts/wallet-primitive-replicability-report.ts` applies a provisional primitive-level replicability score using breadth, timing, regime, and likely execution-style mix.
+- Treat that score as a screening layer, not a final verdict, until more forward days accumulate.
+
 ### Validation gates
 
 - No serious wallet study before minimum sample thresholds are met.

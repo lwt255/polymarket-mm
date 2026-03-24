@@ -5,9 +5,9 @@
 ---
 
 ## ⚡ Current Context
-- **Current State**: Bot Stopped; Collector Running Locally With Enriched Microstructure Metrics; Wallet Reverse-Engineering Pipeline Added
-- **Last Commit**: `1c5a9b4` — feat: enrich collector market microstructure data
-- **Recent Changes**: Added a wallet reverse-engineering research pipeline on top of the collector stack. New scripts probe Polymarket trade schemas, collect raw public wallet trade prints from the Data API into `wallet-trades.raw.jsonl`, enrich them against `pricing-data.raw.jsonl`, and analyze behavior primitives, wallet cohorts, and daily primitive outcome tracking. Current read: broad `BUY_FAVORITE` flow dominates one-sided regimes, while the most promising asymmetric structure is `BUY_UNDERDOG` in two-sided regimes, especially `31-60s` before expiry.
+- **Current State**: Bot Stopped; Collector Running Locally With Enriched Microstructure Metrics; Wallet Reverse-Engineering Pipeline Added And Refreshed
+- **Last Commit**: `35cf0e8` — feat: add wallet reverse-engineering research pipeline
+- **Recent Changes**: Added a wallet reverse-engineering research pipeline on top of the collector stack. New scripts probe Polymarket trade schemas, collect raw public wallet trade prints from the Data API into `wallet-trades.raw.jsonl`, enrich them against `pricing-data.raw.jsonl`, and analyze behavior primitives, wallet cohorts, daily primitive outcome tracking, and primitive replicability. Current read: broad `BUY_FAVORITE` flow dominates one-sided regimes, while the best structural candidates remain `BUY_UNDERDOG` in two-sided regimes. The new replicability filter says those candidates are interesting but still partially execution-constrained, largely because many observed fills print outside the visible top-of-book.
 
 ---
 
@@ -43,6 +43,7 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 - **[src/scripts/wallet-behavior-report.ts](src/scripts/wallet-behavior-report.ts)** - Behavior-first late-window trade flow summary
 - **[src/scripts/wallet-primitive-analysis.ts](src/scripts/wallet-primitive-analysis.ts)** - Primitive breadth/concentration and wallet cohort analysis
 - **[src/scripts/wallet-primitive-daily-tracker.ts](src/scripts/wallet-primitive-daily-tracker.ts)** - Daily primitive tracker with resolved buy-side outcome scoring
+- **[src/scripts/wallet-primitive-replicability-report.ts](src/scripts/wallet-primitive-replicability-report.ts)** - Primitive replicability filter focused on breadth, timing, and execution feasibility
 
 ---
 
