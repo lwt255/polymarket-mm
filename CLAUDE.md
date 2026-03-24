@@ -5,9 +5,9 @@
 ---
 
 ## ⚡ Current Context
-- **Current State**: Bot Stopped; Collector Running Locally Under A Raw-First Research Policy
-- **Last Commit**: `c110e2f` — docs: journal 2026-03-23 — dataset split and liquidity
-- **Recent Changes**: Collector still targets the true 64 markets/hour ceiling, but the data policy was relaxed: `pricing-data.raw.jsonl` is now the broad telemetry corpus with quality flags, `pricing-data.jsonl` stays the strategy-grade T-120 subset, and `pricing-data.rejected.jsonl` is reserved for genuinely malformed records. Current local counts are 2,345 raw / 2,232 strategy-grade / 0 rejected after folding older strict rejects back into raw telemetry.
+- **Current State**: Bot Stopped; Collector Running Locally With Enriched Microstructure Metrics
+- **Last Commit**: `1c5a9b4` — feat: enrich collector market microstructure data
+- **Recent Changes**: Added liquidity-regime analysis plus richer collector telemetry. The collector now records top-book shape, slippage-at-size, one-sided lifecycle, quote churn, underlying path features, quote freshness, missed snapshots, and explicit regime labels while preserving the raw-first policy (`pricing-data.raw.jsonl` broad corpus, `pricing-data.jsonl` T-120 strategy subset, `pricing-data.rejected.jsonl` malformed-only). Current analysis indicates the healthiest regime is markets that remain two-sided through at least `T-60`.
 
 ---
 
@@ -35,6 +35,7 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 - **[scripts/journal-entry.sh](scripts/journal-entry.sh)** - Journal helper commands
 - **[src/scripts/pricing-collector.ts](src/scripts/pricing-collector.ts)** - Live multi-crypto pricing collector with raw-first quality labeling
 - **[src/scripts/pricing-data-utils.ts](src/scripts/pricing-data-utils.ts)** - Shared liquidity classification and tradability helpers
+- **[src/scripts/liquidity-regime-analysis.ts](src/scripts/liquidity-regime-analysis.ts)** - Liquidity/collapse timing analysis for raw collector data
 
 ---
 
