@@ -79,6 +79,7 @@ If not, the pattern is interesting but non-actionable.
 Current implementation note:
 - `src/scripts/wallet-primitive-replicability-report.ts` applies a provisional primitive-level replicability score using breadth, timing, regime, and likely execution-style mix.
 - Treat that score as a screening layer, not a final verdict, until more forward days accumulate.
+- `src/scripts/wallet-execution-diagnostics.ts` is the follow-on check for any primitive blocked by heavy `outside_book` fills; use it to separate stale-book artifacts from price improvement or harder-to-replicate execution paths.
 
 ### Validation gates
 
