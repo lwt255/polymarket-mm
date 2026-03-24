@@ -160,6 +160,10 @@ Outputs:
 - wallet market positions
 - reconstruction confidence metrics
 
+Current implementation note:
+- before deeper intent reconstruction, normalize matched enriched rows into tx-level events and wallet-execution events with `src/scripts/wallet-tx-normalizer.ts`
+- use normalized execution events as the default unit when a public feed transaction hash clearly represents a multi-row paired execution
+
 ### Phase 4: Behavior Primitive Analysis
 
 Goal:

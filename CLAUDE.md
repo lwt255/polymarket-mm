@@ -7,7 +7,7 @@
 ## ⚡ Current Context
 - **Current State**: Bot Stopped; Collector Running Locally With Enriched Microstructure Metrics; Wallet Reverse-Engineering Pipeline Added And Refreshed
 - **Last Commit**: `35cf0e8` — feat: add wallet reverse-engineering research pipeline
-- **Recent Changes**: Added a wallet reverse-engineering research pipeline on top of the collector stack. New scripts probe Polymarket trade schemas, collect raw public wallet trade prints from the Data API into `wallet-trades.raw.jsonl`, enrich them against `pricing-data.raw.jsonl`, and analyze behavior primitives, wallet cohorts, daily primitive outcome tracking, primitive replicability, and execution diagnostics. Current read: broad `BUY_FAVORITE` flow dominates one-sided regimes, while the best structural candidates remain `BUY_UNDERDOG` in two-sided regimes. The current blocker is execution feasibility: many observed `outside_book` prints are fresh, transaction-paired, and often dual-outcome, so stale quotes alone do not explain them.
+- **Recent Changes**: Added a wallet reverse-engineering research pipeline on top of the collector stack. New scripts probe Polymarket trade schemas, collect raw public wallet trade prints from the Data API into `wallet-trades.raw.jsonl`, enrich them against `pricing-data.raw.jsonl`, and analyze behavior primitives, wallet cohorts, daily primitive outcome tracking, primitive replicability, execution diagnostics, and tx-normalized execution events. Current read: broad `BUY_FAVORITE` flow dominates one-sided regimes, while the best structural candidates remain `BUY_UNDERDOG` in two-sided regimes. The current blocker is execution feasibility: many observed `outside_book` prints are fresh, transaction-paired, and often dual-outcome, so stale quotes alone do not explain them. The dominant normalized tx structure is `cross_outcome_same_side`, which should be the default unit for the next analysis pass instead of raw feed rows.
 
 ---
 
@@ -45,6 +45,7 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 - **[src/scripts/wallet-primitive-daily-tracker.ts](src/scripts/wallet-primitive-daily-tracker.ts)** - Daily primitive tracker with resolved buy-side outcome scoring
 - **[src/scripts/wallet-primitive-replicability-report.ts](src/scripts/wallet-primitive-replicability-report.ts)** - Primitive replicability filter focused on breadth, timing, and execution feasibility
 - **[src/scripts/wallet-execution-diagnostics.ts](src/scripts/wallet-execution-diagnostics.ts)** - Decompose `outside_book` prints into price improvement, worse-than-visible fills, quote freshness, and tx-pairing signals
+- **[src/scripts/wallet-tx-normalizer.ts](src/scripts/wallet-tx-normalizer.ts)** - Collapse matched wallet trade rows into tx events and wallet-execution events for downstream normalized analysis
 
 ---
 
