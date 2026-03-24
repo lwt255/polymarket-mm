@@ -5,9 +5,9 @@
 ---
 
 ## ⚡ Current Context
-- **Current State**: Bot Stopped; Collector Running Locally With Enriched Microstructure Metrics
+- **Current State**: Bot Stopped; Collector Running Locally With Enriched Microstructure Metrics; Wallet Reverse-Engineering Pipeline Added
 - **Last Commit**: `1c5a9b4` — feat: enrich collector market microstructure data
-- **Recent Changes**: Added liquidity-regime analysis plus richer collector telemetry. The collector now records top-book shape, slippage-at-size, one-sided lifecycle, quote churn, underlying path features, quote freshness, missed snapshots, and explicit regime labels while preserving the raw-first policy (`pricing-data.raw.jsonl` broad corpus, `pricing-data.jsonl` T-120 strategy subset, `pricing-data.rejected.jsonl` malformed-only). Current analysis indicates the healthiest regime is markets that remain two-sided through at least `T-60`.
+- **Recent Changes**: Added a wallet reverse-engineering research pipeline on top of the collector stack. New scripts probe Polymarket trade schemas, collect raw public wallet trade prints from the Data API into `wallet-trades.raw.jsonl`, enrich them against `pricing-data.raw.jsonl`, and analyze behavior primitives, wallet cohorts, and daily primitive outcome tracking. Current read: broad `BUY_FAVORITE` flow dominates one-sided regimes, while the most promising asymmetric structure is `BUY_UNDERDOG` in two-sided regimes, especially `31-60s` before expiry.
 
 ---
 
@@ -30,12 +30,19 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 - **[AGENTS.md](AGENTS.md)** - Mirror of this file for Codex/other agents
 - **[journal/README.md](journal/README.md)** - Journal system usage
 - **[.env.example](.env.example)** - Environment variable template
+- **[docs/wallet-research-spec.md](docs/wallet-research-spec.md)** - Reverse-engineering spec for wallet behavior research
 
 ### Scripts
 - **[scripts/journal-entry.sh](scripts/journal-entry.sh)** - Journal helper commands
 - **[src/scripts/pricing-collector.ts](src/scripts/pricing-collector.ts)** - Live multi-crypto pricing collector with raw-first quality labeling
 - **[src/scripts/pricing-data-utils.ts](src/scripts/pricing-data-utils.ts)** - Shared liquidity classification and tradability helpers
 - **[src/scripts/liquidity-regime-analysis.ts](src/scripts/liquidity-regime-analysis.ts)** - Liquidity/collapse timing analysis for raw collector data
+- **[src/scripts/wallet-trade-schema-probe.ts](src/scripts/wallet-trade-schema-probe.ts)** - Probe Polymarket wallet-trade/public schema sources before building collectors
+- **[src/scripts/wallet-trade-collector.ts](src/scripts/wallet-trade-collector.ts)** - Raw public wallet trade collector (`wallet-trades.raw.jsonl`)
+- **[src/scripts/enrich-wallet-trades.ts](src/scripts/enrich-wallet-trades.ts)** - Join wallet trades to pricing collector state and regime labels
+- **[src/scripts/wallet-behavior-report.ts](src/scripts/wallet-behavior-report.ts)** - Behavior-first late-window trade flow summary
+- **[src/scripts/wallet-primitive-analysis.ts](src/scripts/wallet-primitive-analysis.ts)** - Primitive breadth/concentration and wallet cohort analysis
+- **[src/scripts/wallet-primitive-daily-tracker.ts](src/scripts/wallet-primitive-daily-tracker.ts)** - Daily primitive tracker with resolved buy-side outcome scoring
 
 ---
 
@@ -204,4 +211,4 @@ const order = await client.createOrder({
 
 ---
 
-**Last Updated**: March 23, 2026
+**Last Updated**: March 24, 2026
