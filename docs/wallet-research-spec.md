@@ -165,6 +165,7 @@ Current implementation note:
 - use normalized execution events as the default unit when a public feed transaction hash clearly represents a multi-row paired execution
 - rerun primitive scoring on `wallet-wallet-executions.normalized.jsonl` before drawing conclusions from raw-row primitive reports; `src/scripts/wallet-normalized-primitive-report.ts` is the current normalized pass
 - use `src/scripts/wallet-cross-outcome-economics.ts` to test whether dominant paired structures are just exact complementary bundles; if `UP + DOWN` is almost always `$1.00` with matched sizes, treat that structure as matching plumbing first and alpha second
+- after identifying exact complement plumbing, isolate the minority slice with `src/scripts/wallet-minority-structure-report.ts`; this is the current path for finding standalone signal that survives outside venue-level paired bundles
 
 ### Phase 4: Behavior Primitive Analysis
 
