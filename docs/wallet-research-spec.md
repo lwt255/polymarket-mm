@@ -167,6 +167,7 @@ Current implementation note:
 - use `src/scripts/wallet-cross-outcome-economics.ts` to test whether dominant paired structures are just exact complementary bundles; if `UP + DOWN` is almost always `$1.00` with matched sizes, treat that structure as matching plumbing first and alpha second
 - after identifying exact complement plumbing, isolate the minority slice with `src/scripts/wallet-minority-structure-report.ts`; this is the current path for finding standalone signal that survives outside venue-level paired bundles
 - after isolating the minority slice, use `src/scripts/wallet-underdog-feature-compare.ts` to compare winning vs losing `BUY_UNDERDOG | two-sided` executions on book depth, churn, freshness, and CL/underlying path features
+- after feature comparison, use `src/scripts/wallet-underdog-filter-scorer.ts` to translate the strongest feature splits into coarse candidate rules and compare filtered vs baseline economics by bucket
 
 ### Phase 4: Behavior Primitive Analysis
 
