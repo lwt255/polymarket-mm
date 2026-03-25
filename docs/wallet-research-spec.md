@@ -170,6 +170,7 @@ Current implementation note:
 - after feature comparison, use `src/scripts/wallet-underdog-filter-scorer.ts` to translate the strongest feature splits into coarse candidate rules and compare filtered vs baseline economics by bucket
 - finally, use `src/scripts/wallet-underdog-strategy-evaluator.ts` to reduce the threshold sweep into a few named candidate strategy presets and decide which one is worth treating as the first real hypothesis
 - before promoting a preset further, run `src/scripts/wallet-underdog-strategy-robustness.ts` to check whether the candidate is broad across crypto/intervals or concentrated in one market pocket
+- after the robustness pass, use `src/scripts/wallet-underdog-btc-eth-15m-report.ts` to test the honest narrowed lane (`BTC/ETH 15m`) against the global minority baseline, the local `31-60s` bucket baseline, and the all-crypto preset; only treat that lane as build-worthy if it still survives after the scope is narrowed
 
 ### Phase 4: Behavior Primitive Analysis
 
