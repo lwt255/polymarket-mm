@@ -169,6 +169,7 @@ Current implementation note:
 - after isolating the minority slice, use `src/scripts/wallet-underdog-feature-compare.ts` to compare winning vs losing `BUY_UNDERDOG | two-sided` executions on book depth, churn, freshness, and CL/underlying path features
 - after feature comparison, use `src/scripts/wallet-underdog-filter-scorer.ts` to translate the strongest feature splits into coarse candidate rules and compare filtered vs baseline economics by bucket
 - finally, use `src/scripts/wallet-underdog-strategy-evaluator.ts` to reduce the threshold sweep into a few named candidate strategy presets and decide which one is worth treating as the first real hypothesis
+- before promoting a preset further, run `src/scripts/wallet-underdog-strategy-robustness.ts` to check whether the candidate is broad across crypto/intervals or concentrated in one market pocket
 
 ### Phase 4: Behavior Primitive Analysis
 
