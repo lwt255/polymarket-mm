@@ -5,9 +5,14 @@
 ---
 
 ## ⚡ Current Context
-- **Current State**: Bot Stopped; Collector Running Locally With Enriched Microstructure Metrics; Wallet Reverse-Engineering Pipeline Added And Refreshed
+- **Current State**: Collector FIXED and running (PID 39438). Resolution now uses on-chain `payoutNumerators` — the only truth. Historical data backfilled with on-chain truth (12K+ records, 16.8% were wrong). Ready to build bot for new strategy.
 - **Last Commit**: `6fec833` — feat: check underdog preset robustness
-- **Recent Changes**: Added a wallet reverse-engineering research pipeline on top of the collector stack. New scripts probe Polymarket trade schemas, collect raw public wallet trade prints from the Data API into `wallet-trades.raw.jsonl`, enrich them against `pricing-data.raw.jsonl`, and analyze behavior primitives, wallet cohorts, daily primitive outcome tracking, primitive replicability, execution diagnostics, tx-normalized execution events, normalized primitive scoring, cross-outcome bundle economics, minority-structure slices, success/failure feature comparisons, concrete threshold scoring, named strategy presets, preset robustness, and a dedicated `BTC/ETH 15m` first-hypothesis report. Current read: broad `BUY_FAVORITE` flow dominates one-sided regimes, while the best structural candidates remain `BUY_UNDERDOG` in two-sided regimes. The dominant paired tx structure is overwhelmingly exact complementary `UP + DOWN = $1.00` with matched sizes, so much of that flow is matching structure rather than standalone alpha. Once those exact complement bundles are stripped out, two-sided underdog flow still looks strong, especially `31-60s` and `0-30s`. The current first build target remains a `31-60s` downside-continuation preset (`finalTrend <= 0`, preferably `clMove <= -1`), but the honest narrowed lane is now `BTC/ETH 15m` rather than "crypto-wide," and it is still materially concentrated in a small number of markets.
+- **Resolution Fix (Mar 29)**: Gamma API `outcomePrices` was ~17% wrong and systematically favored underdogs. Replaced with on-chain CTF contract `payoutNumerators`. Collector verified 100% match rate. All historical data backfilled. Backups saved as `.bak` files.
+- **Old Strategy (DEAD)**: Underdog buying. Collector said 46% WR — real on-chain WR was 13%. Edge never existed.
+- **New Strategy (PROMISING)**: Buy the FAVORITE at 55-65¢ on 5m crypto candles. ETH 71% WR (+11pp edge), XRP 66% WR (+6pp edge), BTC 15m 85% WR (+28pp edge). Portfolio B (ETH+XRP+BTC15m fav) showed $354/day at $50/trade, 10/10 winning days, zero drawdown across 10 days of on-chain-verified data. Needs bot built.
+- **Wallet**: $79.14 EOA + $0.34 proxy = $79.48 total.
+- **Collector**: Running with on-chain resolution via `caffeinate -s nohup`. PID 39438.
+- **Key Scripts**: `verify-collector-resolution.ts` (spot-check), `verify-strategy-winrate.ts` (strategy verification), `backfill-onchain-resolution.ts` (historical fix), `corrected-edge-hunt.ts` (edge analysis).
 
 ---
 
@@ -20,7 +25,7 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 - **Market Making** — Bid/ask spread quoting, oscillation capture
 - **Arbitrage** — YES + NO < $1.00 detection
 
-**Status**: 💎 **PROVEN PROFITABILITY** - 8.10% Portfolio ROI (90-Day Proof)
+**Status**: 🔬 **STRATEGY VALIDATED** — Favorite-buying edge found in on-chain-verified data. Bot build next.
 
 ---
 
@@ -54,6 +59,13 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 - **[src/scripts/wallet-underdog-strategy-evaluator.ts](src/scripts/wallet-underdog-strategy-evaluator.ts)** - Evaluate named candidate strategy presets against minority-slice underdog baselines
 - **[src/scripts/wallet-underdog-strategy-robustness.ts](src/scripts/wallet-underdog-strategy-robustness.ts)** - Stress-test named underdog presets by crypto, interval, and market concentration
 - **[src/scripts/wallet-underdog-btc-eth-15m-report.ts](src/scripts/wallet-underdog-btc-eth-15m-report.ts)** - Compare the chosen underdog preset against the honest narrowed `BTC/ETH 15m` lane and its local baselines
+
+### Execution Bot (NEW — Mar 27)
+- **[src/scripts/crypto-5min/underdog-snipe-bot.ts](src/scripts/crypto-5min/underdog-snipe-bot.ts)** - Live underdog snipe bot. Buys underdog at T-30s with tight/medium/loose filters. Usage: `npx tsx src/scripts/crypto-5min/underdog-snipe-bot.ts [--live] [--size 10] [--max-loss 20] [--filter tight]`
+- **[src/core/execution/position-verifier.ts](src/core/execution/position-verifier.ts)** - On-chain USDC balance verification and hard max loss enforcement
+- **[src/core/execution/order-executor.ts](src/core/execution/order-executor.ts)** - Place orders and confirm fills via `getOpenOrders()` polling — never fire-and-forget
+- **[src/core/execution/trade-ledger.ts](src/core/execution/trade-ledger.ts)** - Append-only trade log (JSONL) with P&L reconciliation
+- **[src/core/clob-client.ts](src/core/clob-client.ts)** - Authenticated CLOB client singleton (viem + L2 API keys)
 
 ---
 

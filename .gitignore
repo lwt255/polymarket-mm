@@ -10,6 +10,9 @@ dist/
 # Logs
 logs/
 *.log
+*.out
+nohup.out
+nohup-overnight.out
 
 # Cache
 cache/
@@ -29,3 +32,44 @@ state/
 .vscode/
 *.swp
 *.swo
+
+# Live data files (large, machine-specific)
+pricing-data.jsonl
+pricing-data.raw.jsonl
+pricing-data.rejected.jsonl
+pricing-data.jsonl.bak
+pricing-data.*.bak
+pricing-data.pre-*.jsonl
+pricing-data.raw.pre-*.jsonl
+pricing-data.rejected.pre-*.jsonl
+
+# Trade logs (contain wallet activity)
+*-trades.jsonl
+*-trades.json
+
+# Experiment/result data files
+*-results.json
+experiment-history.jsonl
+split-experiment-history.jsonl
+
+# Market data dumps (ephemeral)
+active_markets*.json
+big_whales.json
+active_whales.json
+whales.json
+historic_markets.json
+recent_markets.json
+resolved_events.json
+resolved_markets.json
+markets_sample.json
+top_resolved.json
+high_vol.json
+trumptest.json
+jan2026_markets.json
+
+# Wallet research data
+wallet-*.jsonl
+
+# Old underdog bot output
+underdog-*.out
+underdog-stats.json

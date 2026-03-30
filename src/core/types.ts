@@ -58,6 +58,28 @@ export interface Order {
     updatedAt: number;
 }
 
+export interface Candle {
+    timestamp: number;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+}
+
+export interface PriceHistoryPoint {
+    t: number; // timestamp
+    p: number; // price
+}
+
+export interface PriceHistoryParams {
+    market: string;
+    interval: '1m' | '5m' | '15m' | '1h' | '6h' | '1d' | '1w';
+    startTs?: number;
+    endTs?: number;
+    fidelity?: number;
+}
+
 // =============================================================================
 // POSITION & BALANCE TYPES
 // =============================================================================
@@ -125,6 +147,25 @@ export interface Signal {
     skipReason?: string;
 }
 
+export interface ClobTrade {
+    id: string;
+    price: number;
+    size: number;
+    side: OrderSide;
+    timestamp: number;
+    tokenId: string;
+}
+
+export interface TradeParams {
+    id?: string;
+    maker_address?: string;
+    market?: string;
+    asset_id?: string;
+    before?: string;
+    after?: string;
+    limit?: number;
+}
+
 // =============================================================================
 // CONFIG TYPES
 // =============================================================================
@@ -155,4 +196,83 @@ export interface RiskLimits {
     maxConsecutiveLosses: number;
     /** Cooldown minutes after hitting loss limit */
     cooldownMinutes: number;
+}
+
+// =============================================================================
+// BACKTEST TYPES
+// =============================================================================
+
+export interface ExecutionModelConfig {
+    /** Base fill probability (0.0 - 1.0). Realistic: 0.5-0.7 */
+    baseFillProbability: number;
+    /** Fill probability reduction per $100 order size. Realistic: 0.05-0.15 */
+    fillProbabilityDecayPerHundred: number;
+    /** Adverse selection penalty (0.0 - 1.0). Applied when fills happen. Realistic: 0.001-0.003 */
+    adverseSelectionPenalty: number;
+    /** Minimum fill ratio for partial fills (0.0 - 1.0). Realistic: 0.5-0.8 */
+    minPartialFillRatio: number;
+    /** Whether to enable realistic execution modeling */
+    enabled: boolean;
+}
+
+export const DEFAULT_EXECUTION_MODEL: ExecutionModelConfig = {
+    baseFillProbability: 0.70,
+    fillProbabilityDecayPerHundred: 0.10,
+    adverseSelectionPenalty: 0.002,
+    minPartialFillRatio: 0.5,
+    enabled: true,
+};
+
+export interface BacktestConfig {
+    marketId: string;
+    yesTokenId: string;
+    noTokenId: string;
+    startTime: number;
+    endTime: number;
+    initialBalance: number;
+    takerFee: number;
+    makerFee: number;
+    slippage: number; // Decimal (e.g. 0.001 for 0.1%)
+    /** Execution model configuration for realistic fill simulation */
+    executionModel?: ExecutionModelConfig;
+}
+
+export interface BacktestStats {
+    totalTrades: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    profitDollar: number;
+    profitPercent: number;
+    maxDrawdown: number;
+    /** Additional stats for execution model analysis */
+    fillAttempts?: number;
+    actualFills?: number;
+    fillRate?: number;
+    avgFillRatio?: number;
+    adverseSelectionCost?: number;
+}
+
+// =============================================================================
+// EVENT CALENDAR TYPES
+// =============================================================================
+
+export type EventType = 'FED_MEETING' | 'ELECTION' | 'SPORTS_FINAL' | 'EARNINGS' | 'CUSTOM';
+export type EventImpact = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+export interface MarketEvent {
+    id: string;
+    name: string;
+    type: EventType;
+    impact: EventImpact;
+    /** Event timestamp (when the event occurs) */
+    timestamp: number;
+    /** Related market condition IDs */
+    relatedMarkets: string[];
+    /** Expected price move in percentage (e.g., 0.10 for 10%) */
+    expectedMove?: number;
+    /** Pre-event window in minutes (when to start positioning) */
+    preEventWindowMinutes: number;
+    /** Post-event window in minutes (when to exit positions) */
+    postEventWindowMinutes: number;
 }

@@ -18,6 +18,8 @@
  *        (runs for 8 hours = up to ~512 raw records with the current 64/hour ceiling)
  */
 
+import { createPublicClient, http, parseAbi } from 'viem';
+import { polygon } from 'viem/chains';
 import { ChainlinkFeed } from './crypto-5min/chainlink-feed.js';
 import {
     bucketFirstOneSidedTime,
@@ -31,6 +33,14 @@ import {
 } from './pricing-data-utils.js';
 
 const GAMMA = 'https://gamma-api.polymarket.com';
+
+// On-chain CTF contract — the ONLY source of truth for resolution
+const CT_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045' as `0x${string}`;
+const ctAbi = parseAbi([
+    'function payoutDenominator(bytes32 conditionId) view returns (uint256)',
+    'function payoutNumerators(bytes32 conditionId, uint256 index) view returns (uint256)',
+]);
+const polygonClient = createPublicClient({ chain: polygon, transport: http('https://polygon.drpc.org') });
 const CLOB = 'https://clob.polymarket.com';
 const OUTPUT_FILE = 'pricing-data.jsonl';
 const RAW_OUTPUT_FILE = 'pricing-data.raw.jsonl';
@@ -585,23 +595,66 @@ async function takeSnapshot(
     };
 }
 
-async function resolveOutcome(slug: string, retries = 15): Promise<'UP' | 'DOWN' | 'UNKNOWN'> {
-    for (let i = 0; i < retries; i++) {
+/**
+ * Resolve market outcome using on-chain payoutNumerators (the ONLY truth).
+ * Flow: Gamma API → conditionId → on-chain payoutNumerators.
+ * Retries because on-chain resolution can lag market end by 30-120s.
+ */
+async function resolveOutcome(slug: string, retries = 30): Promise<'UP' | 'DOWN' | 'UNKNOWN'> {
+    // Step 1: Get conditionId and outcome labels from Gamma API
+    let conditionId: `0x${string}` | null = null;
+    let outcomes: string[] = [];
+
+    for (let attempt = 0; attempt < 5; attempt++) {
         try {
             const data = await fetchJSON(`${GAMMA}/markets?slug=${slug}`);
             if (data?.[0]) {
-                const prices = JSON.parse(data[0].outcomePrices || '[]').map(Number);
-                const outcomes = JSON.parse(data[0].outcomes || '[]');
-                const upIdx = outcomes.findIndex((o: string) => o.toUpperCase() === 'UP');
-                const downIdx = outcomes.findIndex((o: string) => o.toUpperCase() === 'DOWN');
-                if (upIdx !== -1 && prices[upIdx] >= 0.95) return 'UP';
-                if (downIdx !== -1 && prices[downIdx] >= 0.95) return 'DOWN';
+                conditionId = data[0].conditionId as `0x${string}`;
+                outcomes = JSON.parse(data[0].outcomes || '[]');
+                break;
             }
-        } catch {
-            // API error, retry
-        }
-        if (i < retries - 1) await sleep(4000);
+        } catch { /* retry */ }
+        await sleep(2000);
     }
+
+    if (!conditionId || outcomes.length === 0) {
+        log(`  WARN: Could not fetch conditionId for ${slug} — resolution UNKNOWN`);
+        return 'UNKNOWN';
+    }
+
+    // Step 2: Poll on-chain payoutNumerators until resolved
+    for (let i = 0; i < retries; i++) {
+        try {
+            const den = await polygonClient.readContract({
+                address: CT_ADDRESS, abi: ctAbi,
+                functionName: 'payoutDenominator', args: [conditionId],
+            });
+
+            if (Number(den) > 0) {
+                // Market is resolved on-chain — read the winner
+                for (let oi = 0; oi < outcomes.length; oi++) {
+                    const pn = await polygonClient.readContract({
+                        address: CT_ADDRESS, abi: ctAbi,
+                        functionName: 'payoutNumerators', args: [conditionId, BigInt(oi)],
+                    });
+                    if (pn > 0n) {
+                        const winner = outcomes[oi].toUpperCase() as 'UP' | 'DOWN';
+                        if (i > 0) log(`  On-chain resolved after ${i + 1} polls: ${winner}`);
+                        return winner;
+                    }
+                }
+                // Denominator > 0 but no numerator > 0 — shouldn't happen for binary
+                log(`  WARN: payoutDenominator > 0 but no winning outcome for ${slug}`);
+                return 'UNKNOWN';
+            }
+        } catch (err: any) {
+            // payoutDenominator can revert if condition doesn't exist yet
+            if (i === 0) log(`  On-chain not yet resolved, polling... (${err.message?.slice(0, 60) || 'rpc error'})`);
+        }
+        if (i < retries - 1) await sleep(4000); // 4s between polls, up to ~2 min total
+    }
+
+    log(`  WARN: On-chain resolution not available after ${retries} polls for ${slug}`);
     return 'UNKNOWN';
 }
 
@@ -1036,24 +1089,26 @@ async function collectOneMarket(chainlink: ChainlinkFeed, prevResolution: string
     // Capture Chainlink close price right after market ends
     const chainlinkClose = chainlink.getPrice(clSymbol);
 
-    // Primary resolution: Chainlink (instant, reliable)
+    // Chainlink resolution (for reference/logging)
     const clResolution: 'UP' | 'DOWN' | 'UNKNOWN' =
         (chainlinkOpen > 0 && chainlinkClose > 0)
             ? (chainlinkClose >= chainlinkOpen ? 'UP' : 'DOWN')
             : 'UNKNOWN';
 
-    // Secondary: check Gamma API for official resolution (wait longer for it)
-    await sleep(15000); // 15s buffer for API to update
-    const apiResolution = await resolveOutcome(slug);
+    // On-chain resolution via CTF payoutNumerators — the ONLY source of truth.
+    // Wait 30s after market end for UMA oracle to post resolution on-chain,
+    // then poll up to ~2 min. CL is kept for logging/comparison only.
+    await sleep(30000);
+    const onChainResolution = await resolveOutcome(slug);
 
-    // Use API resolution if available, fall back to Chainlink
-    const resolution = apiResolution !== 'UNKNOWN' ? apiResolution : clResolution;
+    // On-chain is the only truth. CL is for logging/comparison only.
+    const resolution = onChainResolution;
 
-    if (apiResolution !== 'UNKNOWN' && apiResolution !== clResolution && clResolution !== 'UNKNOWN') {
-        log(`  WARNING: API says ${apiResolution} but Chainlink says ${clResolution} — using API`);
+    if (onChainResolution !== 'UNKNOWN' && onChainResolution !== clResolution && clResolution !== 'UNKNOWN') {
+        log(`  NOTE: OnChain=${onChainResolution} CL=${clResolution} — using on-chain (actual payouts)`);
     }
 
-    log(`  Resolution: ${resolution} (API: ${apiResolution}, CL: ${clResolution}) | $${chainlinkOpen.toFixed(2)} → $${chainlinkClose.toFixed(2)} (${chainlinkClose >= chainlinkOpen ? '+' : ''}$${(chainlinkClose - chainlinkOpen).toFixed(2)})`);
+    log(`  Resolution: ${resolution} (on-chain) | CL: ${clResolution} | $${chainlinkOpen.toFixed(2)} → $${chainlinkClose.toFixed(2)} (${chainlinkClose >= chainlinkOpen ? '+' : ''}$${(chainlinkClose - chainlinkOpen).toFixed(2)})`);
 
     // Simulate underdog trades at each snapshot
     const simulatedTrades = simulateTrades(snapshots, resolution);
@@ -1196,7 +1251,8 @@ async function main() {
     let strategyMarketsCollected = 0;
     let rejectedMarkets = 0;
     const collectedSlugs = new Set<string>(); // dedup across all markets
-    let prevResolution = 'UNKNOWN'; // track previous market outcome
+    // Track previous resolution PER CRYPTO (not global — each crypto has its own prev chain)
+    const prevResolutions: Record<string, string> = {};  // e.g. { 'btc': 'UP', 'eth': 'DOWN' }
 
     const stats: RunningStats = {
         markets: 0, simWins: 0, simLosses: 0, simPnlCents: 0,
@@ -1229,14 +1285,25 @@ async function main() {
                 const soonestEnd = Math.min(...byEndTime.keys());
                 const batch = byEndTime.get(soonestEnd) || [];
 
-                log(`\n--- Batch: ${batch.length} markets ending at ${new Date(soonestEnd).toISOString().slice(11, 19)} ---`);
+                // Dedup batch by slug before parallel collection (prevents race condition)
+                const seenInBatch = new Set<string>();
+                const dedupedBatch = batch.filter(m => {
+                    if (seenInBatch.has(m.market.slug)) return false;
+                    seenInBatch.add(m.market.slug);
+                    return true;
+                });
+
+                log(`\n--- Batch: ${dedupedBatch.length} markets ending at ${new Date(soonestEnd).toISOString().slice(11, 19)} ---`);
 
                 // Collect all markets in this batch in parallel
                 const results = await Promise.all(
-                    batch.map(async (mInfo) => {
+                    dedupedBatch.map(async (mInfo) => {
                         if (collectedSlugs.has(mInfo.market.slug)) return null;
                         try {
-                            return await collectOneMarket(chainlink, prevResolution, mInfo);
+                            // Get per-crypto prev resolution
+                            const cryptoSlug = mInfo.market.slug.split('-')[0]; // 'btc', 'eth', etc.
+                            const prevRes = prevResolutions[cryptoSlug] || 'UNKNOWN';
+                            return await collectOneMarket(chainlink, prevRes, mInfo);
                         } catch (err: any) {
                             log(`ERROR collecting ${mInfo.market.slug}: ${err.message}`);
                             return null;
@@ -1248,7 +1315,8 @@ async function main() {
                 for (const record of results) {
                     if (record && record.snapshots.length > 0 && !collectedSlugs.has(record.slug)) {
                         const quality = assessRecordQuality(record);
-                        record.prevResolution = prevResolution;
+                        const cryptoSlug = record.slug.split('-')[0];
+                        record.prevResolution = prevResolutions[cryptoSlug] || 'UNKNOWN';
                         if (quality.warnings.length > 0) {
                             record.qualityWarnings = quality.warnings;
                             log(`  DATA WARNING ${record.slug}: ${quality.warnings.join('; ')}`);
@@ -1262,7 +1330,7 @@ async function main() {
                         }
 
                         collectedSlugs.add(record.slug);
-                        prevResolution = record.resolution;
+                        prevResolutions[cryptoSlug] = record.resolution;
 
                         if (quality.rejected) {
                             rejectedMarkets++;

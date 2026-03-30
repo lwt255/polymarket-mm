@@ -1,0 +1,25 @@
+[Unit]
+Description=Polymarket Live Opportunity Scanner
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/polymarket-mm
+ExecStart=/usr/bin/npx tsx src/scripts/live-scanner.ts
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/pi/polymarket-mm/logs/scanner.log
+StandardError=append:/home/pi/polymarket-mm/logs/scanner-error.log
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target
+
+# ============================================================================
+# USAGE:
+# 1. Copy this file to ~/.config/systemd/user/polymarket-scanner.service
+# 2. Adjust paths to match your Pi setup
+# 3. systemctl --user daemon-reload
+# 4. systemctl --user enable --now polymarket-scanner.service
+# 5. systemctl --user status polymarket-scanner.service
+# ============================================================================

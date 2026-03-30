@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const TAKER_FEE_RATE = 0.001;
 const GAS_COST_CENTS = 100;
 
-const INPUT = 'pricing-data.jsonl';
+const INPUT = process.argv[2] || 'pricing-data.raw.jsonl';
 
 const lines = readFileSync(INPUT, 'utf-8').trim().split('\n');
 console.log(`Processing ${lines.length} records...`);
