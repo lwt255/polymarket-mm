@@ -596,35 +596,7 @@ async function main() {
                 if (!snapshots.has(key)) snapshots.set(key, {});
                 const snaps = snapshots.get(key)!;
 
-                // ── L1: Bracket entry at T-180 (170-190s before end) ──
-                if (secsLeft >= 170 && secsLeft <= 190 && !l1EnteredThisCandle.has(key)) {
-                    const snap = await takeBookSnapshot(market);
-                    if (snap && snap.leader !== 'TIE') {
-                        const leaderSide = snap.leader as 'UP' | 'DOWN';
-                        const leaderAsk = leaderSide === 'UP' ? snap.upAsk : snap.downAsk;
-                        const leaderBid = leaderSide === 'UP' ? snap.upBid : snap.downBid;
-                        const spread = leaderAsk - leaderBid;
-                        const otherAsk = leaderSide === 'UP' ? snap.downAsk : snap.upAsk;
-
-                        // Zone check: 50-80¢, two-sided, spread < 3¢
-                        if (leaderAsk >= 0.50 && leaderAsk < 0.80 && otherAsk < 0.99 && spread < 0.03) {
-                            const shares = Math.floor(TRADE_SIZE_USD / leaderAsk);
-                            const stopLevel = leaderAsk - 0.03;
-                            const targetLevel = leaderAsk + 0.20;
-
-                            l1EnteredThisCandle.add(key);
-                            const trade: L1BracketTrade = {
-                                crypto: crypto.name, interval, slug: market.slug, market,
-                                leaderSide, entryAsk: leaderAsk, entryBid: leaderBid,
-                                entrySpread: spread, shares,
-                                stopLevel, targetLevel,
-                                status: 'OPEN', pnl: 0, candleEnd: soonestEnd,
-                            };
-                            l1Trades.push(trade);
-                            log(`  L1 ENTRY ${key}: ${leaderSide} @${(leaderAsk*100).toFixed(0)}¢ | spread=${(spread*100).toFixed(1)}¢ | stop=${(stopLevel*100).toFixed(0)}¢ target=${(targetLevel*100).toFixed(0)}¢ | ${shares}sh`);
-                        }
-                    }
-                }
+                // L1 bracket system disabled — v4 uses 9-signal entry at T-30 only
 
                 // T-240 capture (230-250s before end)
                 if (!snaps.t240 && secsLeft >= 230 && secsLeft <= 250) {
@@ -655,35 +627,7 @@ async function main() {
                 }
             }
 
-            // ── L1: Log current bid for open trades (informational — no polling-based stops) ──
-            // L1 stops require pre-placed sell limits to work (no slippage).
-            // Polling-based stops lose money due to 6.6¢ avg slippage.
-            // This just tracks what's happening for data collection.
-            for (const trade of l1Trades) {
-                if (trade.status !== 'OPEN') continue;
-                try {
-                    const snap = await takeBookSnapshot(trade.market);
-                    if (!snap) continue;
-                    const currentBid = trade.leaderSide === 'UP' ? snap.upBid : snap.downBid;
-                    if (currentBid <= 0) continue;
-
-                    // Log if stop or target WOULD have been hit (for pre-placed sell analysis)
-                    if (currentBid <= trade.stopLevel) {
-                        trade.status = 'STOPPED';
-                        // Assume exact stop fill (pre-placed sell limit scenario)
-                        trade.pnl = trade.shares * (-0.03); // exact -3¢ stop
-                        l1SessionPnl += trade.pnl;
-                        l1SessionTrades++; l1SessionStops++;
-                        log(`  L1 [info] STOP ${trade.crypto}-${trade.interval}: bid=${(currentBid*100).toFixed(0)}¢ | exact stop PnL: $${trade.pnl.toFixed(2)} (poll PnL would be $${(trade.shares * (currentBid - trade.entryAsk)).toFixed(2)})`);
-                    } else if (currentBid >= trade.targetLevel) {
-                        trade.status = 'TARGET';
-                        trade.pnl = trade.shares * 0.20; // exact +20¢ target
-                        l1SessionPnl += trade.pnl;
-                        l1SessionTrades++; l1SessionTargets++;
-                        log(`  L1 [info] TARGET ${trade.crypto}-${trade.interval}: bid=${(currentBid*100).toFixed(0)}¢ | PnL: $${trade.pnl.toFixed(2)}`);
-                    }
-                } catch {}
-            }
+            // L1 bracket system disabled
 
             // Status log every 30s
             if (secsLeft % 30 < 12) {
@@ -941,29 +885,7 @@ async function main() {
             }
             log(`  Prev updated: ${Object.entries(prevResolutions).map(([k, v]) => `${k}=${v}`).join(' | ')}`);
 
-            // Expire any remaining open L1 trades (resolve at last known bid)
-            for (const trade of l1Trades) {
-                if (trade.status !== 'OPEN') continue;
-                // Check final resolution for P&L comparison
-                const resolution = await resolveOnChain(trade.slug, viemPublicClient, 10);
-                const won = trade.leaderSide === resolution;
-                const holdPnl = won ? trade.shares * (1 - trade.entryAsk) : -(trade.shares * trade.entryAsk);
-                trade.status = 'EXPIRED';
-                trade.pnl = holdPnl; // held to resolution since bracket didn't fill
-                l1SessionPnl += trade.pnl;
-                l1SessionTrades++;
-                const resultStr = won ? 'WIN' : 'LOSS';
-                log(`  L1 EXPIRED ${trade.crypto}-${trade.interval}: held to resolution → ${resultStr} | PnL: $${trade.pnl.toFixed(2)} (bracket didn't fill)`);
-            }
-
-            // L1 session stats
-            if (l1SessionTrades > 0) {
-                log(`  L1 Session: ${l1SessionTrades}T | ${l1SessionStops} stops | ${l1SessionTargets} targets | PnL: $${l1SessionPnl.toFixed(2)}`);
-            }
-
             // Reset for next candle
-            l1Trades.length = 0;
-            l1EnteredThisCandle.clear();
             snapshots.clear();
             await sleep(2000);
             continue;
