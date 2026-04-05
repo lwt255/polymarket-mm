@@ -5,14 +5,18 @@
 ---
 
 ## ⚡ Current Context
-- **Current State**: Collector FIXED and running (PID 39438). Resolution now uses on-chain `payoutNumerators` — the only truth. Historical data backfilled with on-chain truth (12K+ records, 16.8% were wrong). Ready to build bot for new strategy.
-- **Last Commit**: `6fec833` — feat: check underdog preset robustness
-- **Resolution Fix (Mar 29)**: Gamma API `outcomePrices` was ~17% wrong and systematically favored underdogs. Replaced with on-chain CTF contract `payoutNumerators`. Collector verified 100% match rate. All historical data backfilled. Backups saved as `.bak` files.
-- **Old Strategy (DEAD)**: Underdog buying. Collector said 46% WR — real on-chain WR was 13%. Edge never existed.
-- **New Strategy (PROMISING)**: Buy the FAVORITE at 55-65¢ on 5m crypto candles. ETH 71% WR (+11pp edge), XRP 66% WR (+6pp edge), BTC 15m 85% WR (+28pp edge). Portfolio B (ETH+XRP+BTC15m fav) showed $354/day at $50/trade, 10/10 winning days, zero drawdown across 10 days of on-chain-verified data. Needs bot built.
-- **Wallet**: $79.14 EOA + $0.34 proxy = $79.48 total.
-- **Collector**: Running with on-chain resolution via `caffeinate -s nohup`. PID 39438.
-- **Key Scripts**: `verify-collector-resolution.ts` (spot-check), `verify-strategy-winrate.ts` (strategy verification), `backfill-onchain-resolution.ts` (historical fix), `corrected-edge-hunt.ts` (edge analysis).
+- **Current State**: Microstructure bot v2 in DRY RUN (PID 88204). Collector needs restart for 5m-only prev fix.
+- **Strategy (CORRECTED)**: Buy T-30 leader in 50-75¢ zone when `prev=fav` (previous 5m candle resolved same direction). **65.8% WR, +$31/day at $10/trade, 8/13 winning days.** See `project_oos_validated_signals_2026_04_01.md` memory.
+- **Critical Lessons**:
+  - Win rate alone is meaningless — must check $/trade. 82% WR across all prices = -$31 P&L.
+  - Analysis scripts had bid/ask bug (30% inflation), leader-at-open bug, dedup bug, and prev-chaining bug. Original $200/day claim was really $31/day.
+  - Claude's code reviews have missed bugs 5 times. Use Codex review plugin as second opinion.
+- **Old Strategies (DEAD)**: Underdog buying, CL-filtered favorite buying, all-price microstructure signals.
+- **Wallet**: ~$79 EOA.
+- **Collector**: PID 93903, `caffeinate -s nohup`, log: `logs/collector.log`. Needs restart for 5m-only prev fix.
+- **Microstructure Bot v2**: PID 88204, `caffeinate -s nohup`, log: `logs/microstructure-bot.log`. Dry run at $10/trade.
+- **Key Scripts**: `verify-collector-resolution.ts` (spot-check), `verify-strategy-winrate.ts` (strategy verification), `backfill-onchain-resolution.ts` (historical fix).
+- **Codex Review**: Plugin installed globally. Use `/codex:review` or `/codex:adversarial-review` before trusting any analysis results.
 
 ---
 
@@ -25,7 +29,7 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 - **Market Making** — Bid/ask spread quoting, oscillation capture
 - **Arbitrage** — YES + NO < $1.00 detection
 
-**Status**: 🔬 **STRATEGY VALIDATED** — Favorite-buying edge found in on-chain-verified data. Bot build next.
+**Status**: 🔬 **DRY RUN** — Microstructure bot running, validating live signals before going live.
 
 ---
 
@@ -97,6 +101,60 @@ state/              # Runtime state files (JSON)
 logs/               # Log output
 systemd/            # VPS deployment templates
 ```
+
+---
+
+## 🖥️ Process Management (Mac)
+
+Long-running processes (collector, bots) must use `caffeinate -s nohup` to survive terminal close and prevent Mac sleep:
+
+```bash
+# Start a bot (dry run) — APPEND to log, don't overwrite
+caffeinate -s nohup npx tsx src/scripts/crypto-5min/microstructure-bot.ts >> logs/microstructure-bot.log 2>&1 &
+
+# Start a bot (live)
+caffeinate -s nohup npx tsx src/scripts/crypto-5min/microstructure-bot.ts --live --size 10 >> logs/microstructure-bot.log 2>&1 &
+
+# Start the collector
+caffeinate -s nohup npx tsx src/scripts/pricing-collector.ts >> logs/collector.log 2>&1 &
+
+# Check if running
+ps aux | grep microstructure-bot | grep -v grep
+
+# Tail logs
+tail -f logs/microstructure-bot.log
+
+# Kill
+kill <PID>
+```
+
+**Why both?** `nohup` keeps the process alive after terminal close. `caffeinate -s` prevents macOS system sleep. Without both, the bot dies on terminal exit or Mac sleep.
+
+**Future**: Move to Raspberry Pi or VPS with `systemd` for proper process supervision (templates in `systemd/`).
+
+---
+
+## 🔍 Codex Review (Second Opinion)
+
+The Codex plugin (GPT-5.4) is installed globally. **ALWAYS use it before trusting analysis results** — Claude's own code reviews have missed bugs 5 times in this project.
+
+```bash
+# Standard review of current changes
+/codex:review
+
+# Adversarial review (challenges assumptions and design)
+/codex:adversarial-review
+
+# Hand off deep investigation to Codex
+/codex:rescue
+```
+
+**When to use**: Any time an analysis produces a number that will drive a trading decision (strategy P&L, win rates, signal validation). The review should specifically check:
+1. Is P&L computed using ASK price (not BID)?
+2. Is the leader determined at T-30 (not market open)?
+3. Is data deduped (no duplicate slugs)?
+4. Does prev only chain from 5m candles?
+5. Are there any lookahead biases (using data the bot wouldn't have at decision time)?
 
 ---
 

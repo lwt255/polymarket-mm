@@ -13,6 +13,11 @@
 import { ClobClient } from '@polymarket/clob-client';
 
 export type FillStatus = 'FILLED' | 'UNFILLED' | 'ERROR';
+export type FillType = 'MAKER' | 'TAKER' | 'UNFILLED';
+
+export interface FallbackResult extends ExecutionResult {
+    fillType: FillType;
+}
 
 export interface ExecutionResult {
     status: FillStatus;
@@ -30,8 +35,10 @@ export interface ExecutionResult {
 }
 
 const CONFIRM_POLL_INTERVAL_MS = 1000;
-const CONFIRM_MAX_POLLS = 12;  // 12 seconds max to confirm
-const CANCEL_AFTER_POLLS = 6;  // cancel resting order after 6 seconds
+const CONFIRM_MAX_POLLS = 25;  // 25 seconds max to confirm
+const CANCEL_AFTER_POLLS = 20; // cancel resting order after 20 seconds (was 6s — too aggressive)
+const MAKER_TIMEOUT_POLLS = 12; // try maker for 12 seconds before falling back to taker
+const TAKER_TIMEOUT_POLLS = 10; // 10 more seconds for taker attempt
 
 export class OrderExecutor {
     private client: ClobClient;
@@ -146,6 +153,159 @@ export class OrderExecutor {
                 timestamps: { orderPlaced, confirmationReceived },
             };
         }
+    }
+
+    /**
+     * Place a maker order (bid+1¢), and if it doesn't fill within 12s,
+     * cancel and fall back to a taker order at the current ask.
+     */
+    async executeWithFallback(
+        tokenId: string,
+        makerPrice: number,
+        sizeUsd: number,
+        getAskPrice: () => Promise<number>,
+        log?: (msg: string) => void,
+    ): Promise<FallbackResult> {
+        const shares = Math.floor(sizeUsd / makerPrice);
+        if (shares < 1) {
+            return { ...this.errorResult('Position too small for 1 share', makerPrice, 0), fillType: 'UNFILLED' };
+        }
+
+        const orderPlaced = Date.now();
+
+        // Phase 1: Try maker order
+        let orderId: string;
+        try {
+            const result = await this.client.createAndPostOrder({
+                tokenID: tokenId,
+                price: makerPrice,
+                size: shares,
+                side: 'BUY' as any,
+            });
+            if (!result?.orderID || result?.error) {
+                return { ...this.errorResult(result?.error || 'No orderID returned', makerPrice, shares), fillType: 'UNFILLED' };
+            }
+            orderId = result.orderID;
+        } catch (err: any) {
+            return { ...this.errorResult(`Order placement failed: ${err.message}`, makerPrice, shares), fillType: 'UNFILLED' };
+        }
+
+        // Poll maker for MAKER_TIMEOUT_POLLS seconds
+        for (let poll = 0; poll < MAKER_TIMEOUT_POLLS; poll++) {
+            await this.sleep(CONFIRM_POLL_INTERVAL_MS);
+            try {
+                const openOrders = await this.client.getOpenOrders() || [];
+                const stillOpen = openOrders.some((o: any) => o.id === orderId || o.orderID === orderId);
+                if (!stillOpen) {
+                    // Maker filled
+                    log?.(`    Maker filled in ${poll + 1}s`);
+                    return {
+                        status: 'FILLED', orderId,
+                        fillPrice: makerPrice, fillSize: shares, fillCost: shares * makerPrice,
+                        requestedPrice: makerPrice, requestedShares: shares,
+                        timestamps: { orderPlaced, confirmationReceived: Date.now() },
+                        fillType: 'MAKER',
+                    };
+                }
+            } catch {
+                continue; // network blip, keep polling
+            }
+        }
+
+        // Phase 2: Cancel maker, fall back to taker
+        log?.(`    Maker unfilled after ${MAKER_TIMEOUT_POLLS}s — falling back to taker`);
+        try {
+            await this.client.cancelOrder({ orderID: orderId } as any);
+        } catch {
+            // Cancel may fail if it just filled — we'll detect in polling
+        }
+        await this.sleep(1000); // let cancellation propagate
+
+        // After cancel, order disappears from open orders whether it was filled or cancelled.
+        // We cannot distinguish the two from getOpenOrders alone.
+        // Proceed to taker fallback — if the maker DID fill, the taker will fail (no balance)
+        // which is safer than falsely assuming a fill.
+
+        // Place taker order at current ask
+        let takerPrice: number;
+        try {
+            takerPrice = await getAskPrice();
+        } catch {
+            return {
+                status: 'UNFILLED', orderId, fillPrice: 0, fillSize: 0, fillCost: 0,
+                requestedPrice: makerPrice, requestedShares: shares,
+                error: 'Failed to read ask for taker fallback',
+                timestamps: { orderPlaced, confirmationReceived: Date.now() },
+                fillType: 'UNFILLED',
+            };
+        }
+
+        const takerShares = Math.floor(sizeUsd / takerPrice);
+        if (takerShares < 1) {
+            return {
+                status: 'UNFILLED', orderId, fillPrice: 0, fillSize: 0, fillCost: 0,
+                requestedPrice: takerPrice, requestedShares: 0,
+                error: 'Taker price too high for 1 share',
+                timestamps: { orderPlaced, confirmationReceived: Date.now() },
+                fillType: 'UNFILLED',
+            };
+        }
+
+        log?.(`    Taker order at ${(takerPrice * 100).toFixed(0)}¢ (${takerShares} shares)`);
+
+        let takerOrderId: string;
+        try {
+            const result = await this.client.createAndPostOrder({
+                tokenID: tokenId,
+                price: takerPrice,
+                size: takerShares,
+                side: 'BUY' as any,
+            });
+            if (!result?.orderID || result?.error) {
+                return { ...this.errorResult(result?.error || 'Taker order failed', takerPrice, takerShares), fillType: 'UNFILLED' };
+            }
+            takerOrderId = result.orderID;
+        } catch (err: any) {
+            return { ...this.errorResult(`Taker order failed: ${err.message}`, takerPrice, takerShares), fillType: 'UNFILLED' };
+        }
+
+        // Poll taker for TAKER_TIMEOUT_POLLS seconds
+        let takerCancelled = false;
+        for (let poll = 0; poll < TAKER_TIMEOUT_POLLS; poll++) {
+            await this.sleep(CONFIRM_POLL_INTERVAL_MS);
+            try {
+                const openOrders = await this.client.getOpenOrders() || [];
+                const stillOpen = openOrders.some((o: any) => o.id === takerOrderId || o.orderID === takerOrderId);
+                if (!stillOpen) {
+                    log?.(`    Taker filled in ${poll + 1}s`);
+                    return {
+                        status: 'FILLED', orderId: takerOrderId,
+                        fillPrice: takerPrice, fillSize: takerShares, fillCost: takerShares * takerPrice,
+                        requestedPrice: takerPrice, requestedShares: takerShares,
+                        timestamps: { orderPlaced, confirmationReceived: Date.now() },
+                        fillType: 'TAKER',
+                    };
+                }
+                // Cancel taker if running out of time
+                if (poll >= TAKER_TIMEOUT_POLLS - 2 && !takerCancelled) {
+                    try {
+                        await this.client.cancelOrder({ orderID: takerOrderId } as any);
+                        takerCancelled = true;
+                    } catch { /* next poll resolves */ }
+                }
+            } catch {
+                continue;
+            }
+        }
+
+        return {
+            status: 'UNFILLED', orderId: takerOrderId,
+            fillPrice: 0, fillSize: 0, fillCost: 0,
+            requestedPrice: takerPrice, requestedShares: takerShares,
+            error: 'Both maker and taker failed to fill',
+            timestamps: { orderPlaced, confirmationReceived: Date.now() },
+            fillType: 'UNFILLED',
+        };
     }
 
     /**

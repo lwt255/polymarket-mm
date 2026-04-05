@@ -1316,7 +1316,7 @@ async function main() {
                     if (record && record.snapshots.length > 0 && !collectedSlugs.has(record.slug)) {
                         const quality = assessRecordQuality(record);
                         const cryptoSlug = record.slug.split('-')[0];
-                        record.prevResolution = prevResolutions[cryptoSlug] || 'UNKNOWN';
+                        // prevResolution is already set correctly inside collectOneMarket() — do NOT overwrite here
                         if (quality.warnings.length > 0) {
                             record.qualityWarnings = quality.warnings;
                             log(`  DATA WARNING ${record.slug}: ${quality.warnings.join('; ')}`);
@@ -1330,7 +1330,11 @@ async function main() {
                         }
 
                         collectedSlugs.add(record.slug);
-                        prevResolutions[cryptoSlug] = record.resolution;
+                        // Only update prevResolution from 5m candles — matches bot logic
+                        // (bot only uses 5m resolutions as prev, ignoring 15m)
+                        if (record.slug.includes('-5m-')) {
+                            prevResolutions[cryptoSlug] = record.resolution;
+                        }
 
                         if (quality.rejected) {
                             rejectedMarkets++;

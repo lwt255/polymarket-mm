@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polymarket Bot v4</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Fira Code', monospace; background: #0d1117; color: #c9d1d9; min-height: 100vh; padding: 16px; }
+  .container { max-width: 960px; margin: 0 auto; }
+
+  /* Header */
+  .header { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #21262d; margin-bottom: 16px; }
+  .header h1 { font-size: 18px; color: #58a6ff; font-weight: 600; }
+  .header .time { font-size: 13px; color: #8b949e; }
+  .status-row { display: flex; gap: 16px; margin-bottom: 16px; font-size: 13px; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+  .status-dot.on { background: #3fb950; }
+  .status-dot.off { background: #f85149; }
+  .warning { background: #f8514920; color: #f85149; padding: 8px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 12px; }
+
+  /* Cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 14px; }
+  .card .label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .card .value { font-size: 24px; font-weight: 700; }
+  .card .sub { font-size: 12px; color: #8b949e; margin-top: 2px; }
+  .green { color: #3fb950; }
+  .red { color: #f85149; }
+  .blue { color: #58a6ff; }
+
+  /* Chart */
+  .chart-container { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+  .chart-container h2 { font-size: 14px; color: #8b949e; margin-bottom: 12px; }
+  canvas { width: 100%; height: 200px; }
+
+  /* Tables */
+  .section { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+  .section h2 { font-size: 14px; color: #8b949e; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: #8b949e; font-weight: 500; padding: 6px 8px; border-bottom: 1px solid #21262d; font-size: 11px; text-transform: uppercase; }
+  td { padding: 8px; border-bottom: 1px solid #21262d10; }
+  tr:hover { background: #1c2128; }
+  .win-row { border-left: 3px solid #3fb950; }
+  .loss-row { border-left: 3px solid #f85149; }
+
+  /* Stats grid */
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+  @media (max-width: 600px) { .stats-grid { grid-template-columns: 1fr; } .cards { grid-template-columns: repeat(2, 1fr); } }
+
+  /* Log */
+  .log { font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace; color: #8b949e; max-height: 200px; overflow-y: auto; }
+  .log div { padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log .win-line { color: #3fb950; }
+  .log .loss-line { color: #f85149; }
+  .log .buy-line { color: #58a6ff; }
+
+  /* Refresh indicator */
+  .refresh { position: fixed; bottom: 12px; right: 12px; font-size: 11px; color: #484f58; }
+
+  /* Pulse animation for live dot */
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .pulse { animation: pulse 2s infinite; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>Polymarket Bot v4</h1>
+    <div class="time" id="time"></div>
+  </div>
+
+  <div class="status-row" id="status-row">
+    <span><span class="status-dot off" id="bot-dot"></span> Bot: <span id="bot-status">--</span></span>
+    <span><span class="status-dot off" id="col-dot"></span> Collector: <span id="col-status">--</span></span>
+    <span>Balance: <strong id="balance">--</strong></span>
+  </div>
+
+  <div id="warnings"></div>
+
+  <div class="cards" id="cards">
+    <div class="card"><div class="label">Trades</div><div class="value" id="c-trades">--</div><div class="sub" id="c-record">--</div></div>
+    <div class="card"><div class="label">Win Rate</div><div class="value" id="c-wr">--</div><div class="sub" id="c-streak">--</div></div>
+    <div class="card"><div class="label">PnL</div><div class="value" id="c-pnl">--</div><div class="sub" id="c-avg">--</div></div>
+    <div class="card"><div class="label">Today</div><div class="value" id="c-today-pnl">--</div><div class="sub" id="c-today-record">--</div></div>
+  </div>
+
+  <div class="chart-container">
+    <h2>Cumulative P&L</h2>
+    <canvas id="pnl-chart" height="200"></canvas>
+  </div>
+
+  <div class="stats-grid">
+    <div class="section">
+      <h2>By Symbol</h2>
+      <table><thead><tr><th>Symbol</th><th>Trades</th><th>WR</th><th>PnL</th></tr></thead><tbody id="sym-table"></tbody></table>
+    </div>
+    <div class="section">
+      <h2>Maker vs Taker</h2>
+      <table><thead><tr><th>Type</th><th>Trades</th><th>PnL</th></tr></thead><tbody id="mt-table"></tbody></table>
+      <div style="margin-top:12px">
+        <h2>By Hour (UTC)</h2>
+        <table><thead><tr><th>Hour</th><th>Trades</th><th>WR</th><th>PnL</th></tr></thead><tbody id="hour-table"></tbody></table>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Trade History</h2>
+    <table>
+      <thead><tr><th>Time</th><th>Crypto</th><th>Result</th><th>PnL</th><th>Ask</th><th>Fill</th><th>Type</th><th>Signals</th></tr></thead>
+      <tbody id="trade-table"></tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>Recent Activity</h2>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<div class="refresh" id="refresh">Refreshing every 15s</div>
+
+<script>
+function pnlStr(v) { return v >= 0 ? `+$${v.toFixed(2)}` : `-$${Math.abs(v).toFixed(2)}`; }
+function pnlClass(v) { return v >= 0 ? 'green' : 'red'; }
+
+function drawChart(canvas, data) {
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    const W = rect.width, H = rect.height;
+    const pad = { t: 10, r: 10, b: 25, l: 50 };
+    const cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
+
+    if (data.length < 2) { ctx.fillStyle = '#8b949e'; ctx.fillText('Not enough data', W/2 - 40, H/2); return; }
+
+    const min = Math.min(...data, 0);
+    const max = Math.max(...data, 0);
+    const range = max - min || 1;
+
+    const x = (i) => pad.l + (i / (data.length - 1)) * cw;
+    const y = (v) => pad.t + ch - ((v - min) / range) * ch;
+
+    // Grid
+    ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+    const steps = 4;
+    for (let i = 0; i <= steps; i++) {
+        const val = min + (range / steps) * i;
+        const yy = y(val);
+        ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke();
+        ctx.fillStyle = '#484f58'; ctx.font = '11px monospace'; ctx.textAlign = 'right';
+        ctx.fillText(`$${val.toFixed(0)}`, pad.l - 6, yy + 4);
+    }
+
+    // Zero line
+    if (min < 0 && max > 0) {
+        ctx.strokeStyle = '#484f58'; ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(pad.l, y(0)); ctx.lineTo(W - pad.r, y(0)); ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // Trade count axis
+    ctx.fillStyle = '#484f58'; ctx.font = '11px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('0', x(0), H - 5);
+    ctx.fillText(`${data.length - 1}`, x(data.length - 1), H - 5);
+    if (data.length > 10) ctx.fillText(`${Math.floor((data.length-1)/2)}`, x(Math.floor((data.length-1)/2)), H - 5);
+
+    // Line
+    const lastVal = data[data.length - 1];
+    ctx.strokeStyle = lastVal >= 0 ? '#3fb950' : '#f85149';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    data.forEach((v, i) => { i === 0 ? ctx.moveTo(x(i), y(v)) : ctx.lineTo(x(i), y(v)); });
+    ctx.stroke();
+
+    // Fill
+    ctx.globalAlpha = 0.1;
+    ctx.fillStyle = lastVal >= 0 ? '#3fb950' : '#f85149';
+    ctx.beginPath();
+    data.forEach((v, i) => { i === 0 ? ctx.moveTo(x(i), y(v)) : ctx.lineTo(x(i), y(v)); });
+    ctx.lineTo(x(data.length - 1), y(0));
+    ctx.lineTo(x(0), y(0));
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Current value label
+    ctx.fillStyle = lastVal >= 0 ? '#3fb950' : '#f85149';
+    ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(pnlStr(lastVal), W - pad.r, y(lastVal) - 8);
+}
+
+async function refresh() {
+    try {
+        const res = await fetch('/api/status');
+        const d = await res.json();
+
+        // Time
+        document.getElementById('time').textContent = new Date(d.timestamp).toLocaleString();
+
+        // Status
+        const botDot = document.getElementById('bot-dot');
+        const colDot = document.getElementById('col-dot');
+        botDot.className = `status-dot ${d.bot.running ? 'on pulse' : 'off'}`;
+        colDot.className = `status-dot ${d.collector.running ? 'on' : 'off'}`;
+        document.getElementById('bot-status').textContent = d.bot.mode;
+        document.getElementById('col-status').textContent = d.collector.running ? 'ON' : 'OFF';
+        document.getElementById('balance').textContent = d.balance >= 0 ? `$${d.balance.toFixed(2)}` : '--';
+
+        // Warnings
+        const warnDiv = document.getElementById('warnings');
+        warnDiv.innerHTML = d.warnings.map(w => `<div class="warning">${w}</div>`).join('');
+
+        // Cards
+        const a = d.allTime;
+        document.getElementById('c-trades').textContent = a.trades;
+        document.getElementById('c-record').textContent = `${a.wins}W / ${a.losses}L`;
+        document.getElementById('c-wr').innerHTML = `<span class="${a.wr >= 65 ? 'green' : a.wr >= 55 ? 'blue' : 'red'}">${a.wr}%</span>`;
+        document.getElementById('c-streak').textContent = `streak: ${a.streak}`;
+        document.getElementById('c-pnl').innerHTML = `<span class="${pnlClass(a.pnl)}">${pnlStr(a.pnl)}</span>`;
+        document.getElementById('c-avg').textContent = `${pnlStr(a.avgPnl)}/trade`;
+
+        const t = d.today;
+        document.getElementById('c-today-pnl').innerHTML = `<span class="${pnlClass(t.pnl)}">${pnlStr(t.pnl)}</span>`;
+        document.getElementById('c-today-record').textContent = `${t.wins}W/${t.losses}L (${t.wr}%)`;
+
+        // Chart
+        drawChart(document.getElementById('pnl-chart'), d.pnlCurve);
+
+        // Symbol table
+        document.getElementById('sym-table').innerHTML = d.bySymbol.map(s =>
+            `<tr><td><strong>${s.symbol}</strong></td><td>${s.trades} (${s.wins}W/${s.losses}L)</td><td>${s.wr}%</td><td class="${pnlClass(s.pnl)}">${pnlStr(s.pnl)}</td></tr>`
+        ).join('');
+
+        // Maker vs taker
+        document.getElementById('mt-table').innerHTML = `
+            <tr><td>Maker</td><td>${d.makerVsTaker.maker}</td><td class="${pnlClass(d.makerVsTaker.makerPnl)}">${pnlStr(d.makerVsTaker.makerPnl)}</td></tr>
+            <tr><td>Taker</td><td>${d.makerVsTaker.taker}</td><td class="${pnlClass(d.makerVsTaker.takerPnl)}">${pnlStr(d.makerVsTaker.takerPnl)}</td></tr>
+        `;
+
+        // Hour table
+        document.getElementById('hour-table').innerHTML = d.byHour.map(h =>
+            `<tr><td>${String(h.hour).padStart(2,'0')}:00</td><td>${h.trades}</td><td>${h.wr}%</td><td class="${pnlClass(h.pnl)}">${pnlStr(h.pnl)}</td></tr>`
+        ).join('');
+
+        // Trade history
+        document.getElementById('trade-table').innerHTML = d.trades.slice(0, 50).map(t =>
+            `<tr class="${t.won ? 'win-row' : 'loss-row'}">
+                <td>${t.time.slice(5)}</td>
+                <td><strong>${t.crypto}</strong></td>
+                <td class="${t.won ? 'green' : 'red'}">${t.won ? 'WIN' : 'LOSS'}</td>
+                <td class="${pnlClass(t.pnl)}">${pnlStr(t.pnl)}</td>
+                <td>${(t.ask * 100).toFixed(0)}c</td>
+                <td>${(t.fillPrice * 100).toFixed(0)}c</td>
+                <td>${t.fillType === 'MAKER' ? 'M' : 'T'}</td>
+                <td>${t.signals}sig</td>
+            </tr>`
+        ).join('');
+
+        // Log
+        document.getElementById('log').innerHTML = d.recentLog.map(l => {
+            let cls = '';
+            if (l.includes('WIN')) cls = 'win-line';
+            else if (l.includes('LOSS')) cls = 'loss-line';
+            else if (l.includes('BUY')) cls = 'buy-line';
+            return `<div class="${cls}">${l.replace(/</g, '&lt;')}</div>`;
+        }).join('');
+
+        document.getElementById('refresh').textContent = `Last updated: ${new Date().toLocaleTimeString()} | Refreshing every 15s`;
+    } catch (err) {
+        document.getElementById('refresh').textContent = `Error: ${err.message} | Retrying...`;
+    }
+}
+
+refresh();
+setInterval(refresh, 15000);
+window.addEventListener('resize', refresh);
+</script>
+</body>
+</html>
