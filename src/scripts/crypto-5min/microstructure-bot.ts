@@ -269,6 +269,7 @@ interface EntrySignals {
     leaderAsk: number;
     leaderTokenId: string;
     leaderAskSize: number;
+    leaderAskDepth: number;
     prevMatchesFav: boolean;      // previous candle resolved same direction as leader
     leaderRising: boolean | null; // leader's bid at T-30 > at T-120
     // v3 signals
@@ -302,6 +303,7 @@ function computeSignals(
     const leaderAsk = leaderSide === 'UP' ? snapT30.upAsk : snapT30.downAsk;
     const leaderTokenId = leaderSide === 'UP' ? snapT30.upToken : snapT30.downToken;
     const leaderAskSize = leaderSide === 'UP' ? snapT30.upAskSize : snapT30.downAskSize;
+    const leaderAskDepth = leaderSide === 'UP' ? snapT30.upAskDepth : snapT30.downAskDepth;
 
     // Core signal: previous candle resolved same direction as current leader
     const prevMatchesFav = prevResolution === leaderSide;
@@ -400,14 +402,14 @@ function computeSignals(
     // Liquidity check
     if (action === 'TRADE') {
         const sharesNeeded = Math.floor(TRADE_SIZE_USD / leaderAsk);
-        if (leaderAskSize < sharesNeeded) {
+        if (leaderAskDepth < sharesNeeded) {
             action = 'SKIP';
-            reason = `thin(${leaderAskSize.toFixed(0)}sh < ${sharesNeeded}sh needed)`;
+            reason = `thin(${leaderAskDepth.toFixed(0)}sh total < ${sharesNeeded}sh needed)`;
         }
     }
 
     return {
-        leaderSide, leaderBid, leaderAsk, leaderTokenId, leaderAskSize,
+        leaderSide, leaderBid, leaderAsk, leaderTokenId, leaderAskSize, leaderAskDepth,
         prevMatchesFav, leaderRising,
         flip60, isUSEve, isWeekend, crossSame,
         sweetZone, accelerating, strongDepth, lateFlip,
@@ -661,10 +663,10 @@ async function main() {
 
             const soonestMarkets = markets.filter(m => new Date(m.market.endDate).getTime() === soonestEnd);
 
-            let balanceBefore = -1;
+            let batchBalanceBefore = -1;
             if (IS_LIVE && verifier) {
                 const check = await verifier.getBalance();
-                balanceBefore = check.balance;
+                batchBalanceBefore = check.balance;
             }
 
             for (const { market, crypto, interval } of soonestMarkets) {
@@ -732,7 +734,7 @@ async function main() {
                 pendingTrades.push({
                     signals, crypto: crypto.name, interval,
                     slug: market.slug, conditionId: market.conditionId || '',
-                    execResult, candleEnd: soonestEnd, balanceBefore,
+                    execResult, candleEnd: soonestEnd, balanceBefore: batchBalanceBefore,
                     market, stoppedOut: false, wouldHaveStopped: false, stopPnl: 0,
                 });
             }
@@ -778,6 +780,12 @@ async function main() {
 
             if (pendingTrades.length > 0) {
                 log(`  Resolving ${pendingTrades.length} pending trade(s)...`);
+                const filledTradesThisBatch = pendingTrades.filter(p => p.execResult.status === 'FILLED');
+                const canReconcileIndividually = IS_LIVE && verifier && filledTradesThisBatch.length === 1;
+
+                if (IS_LIVE && filledTradesThisBatch.length > 1) {
+                    log(`  Note: ${filledTradesThisBatch.length} fills in one candle — skipping per-trade balance reconciliation because positions overlap`);
+                }
 
                 for (const pending of pendingTrades) {
                     const { signals, crypto, interval, slug, conditionId, execResult, balanceBefore } = pending;
@@ -833,7 +841,7 @@ async function main() {
                         balanceAfter = postCheck.success ? postCheck.balance : -1;
                     }
 
-                    const reconciliation = (IS_LIVE && balanceBefore > 0 && balanceAfter > 0 && verifier)
+                    const reconciliation = (canReconcileIndividually && execResult.status === 'FILLED' && balanceBefore > 0 && balanceAfter > 0 && verifier)
                         ? verifier.reconcile(expectedPnl, balanceBefore, balanceAfter)
                         : null;
 
@@ -897,7 +905,7 @@ async function main() {
     // ── Session Summary ──
     const stats = ledger.getStats();
     log('\n' + '='.repeat(60));
-    log('SESSION SUMMARY — MICROSTRUCTURE BOT v2');
+    log('SESSION SUMMARY — MICROSTRUCTURE BOT v4');
     log(`Trades: ${stats.trades} | Wins: ${stats.wins} | WR: ${(stats.winRate * 100).toFixed(0)}%`);
     log(`PnL: $${stats.pnl.toFixed(2)}`);
     if (IS_LIVE && verifier) {
