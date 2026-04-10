@@ -39,6 +39,31 @@ Each phase has the **same strategy, same code, same risk profile** — just diff
 
 **Hard ceiling**: Phase 5. Beyond ~$500/trade, the strategy starts eating top-of-book depth on thinner crypto markets (typical depth: 20-40k shares; $500 ≈ 770 shares is well under, $2000 ≈ 3000 shares would be ~10% of top-of-book on thin books). The strategy does not scale beyond this without becoming a different strategy.
 
+## Bankroll extraction policy
+
+This strategy should not be treated like a permanent casino franchise. It is an opportunistic edge on a third-party platform, which means bankroll management should prioritize **survival first, extraction second, compounding third**.
+
+For the current live configuration of `$10/trade`, the operating policy is:
+
+- **Below `$500` bankroll**: extract nothing. All profits stay in the account until Phase 1 bankroll is fully built.
+- **`$500` to `$600` bankroll**: still prioritize retention. Small withdrawals are allowed, but the default is to keep building cushion.
+- **Above `$600` bankroll**: begin sweeping excess capital out of Polymarket.
+
+Concrete rule:
+
+- **Operating bankroll cap**: `$600`
+- **Sweep amount**: withdraw `75%` of bankroll above `$600`
+- **Residual kept live**: leave `25%` of the excess in the account unless intentionally building toward the next phase
+- **Sweep cadence**: at a calm checkpoint, preferably daily close or weekly review, not intraday highs
+
+Examples:
+
+- If bankroll is `$540`, do nothing.
+- If bankroll is `$615`, excess is `$15`; sweep about `$11` and leave about `$4` in the account.
+- If bankroll is `$800`, excess is `$200`; sweep `$150` and leave `$50`, resulting in a new bankroll near `$650`.
+
+This policy matches the project's actual objective: extract as much money as practical while the edge exists, but keep enough operating capital live that a normal drawdown does not force a premature stop.
+
 ---
 
 ## Phase entry criteria (when to graduate)
