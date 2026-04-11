@@ -382,38 +382,23 @@ function computeSignals(
 
     const isWeakMiddleZone = leaderAsk >= 0.60 && leaderAsk < 0.65;
 
-    // Time-of-day filter: skip hours where the 9-signal filter has no edge or is net-negative
-    //   - 12-14 UTC (8-10am ET): 64.6% WR at 64.5¢ → breakeven; -$0.11/tr over 79 sim trades
-    //   - 18-20 UTC (2-4pm ET): 58.8% WR at 64.6¢ → 5.9pp below breakeven; -$0.92/tr over 80 sim trades
-    // Both buckets are tracked in monitoring; revisit if 2+ weeks of fresh data shows them flipping positive.
-    const nowUtcHour = new Date().getUTCHours();
-    const isDeadHour = (nowUtcHour >= 12 && nowUtcHour < 15) || (nowUtcHour >= 18 && nowUtcHour < 21);
-
     if (!isTwoSided) {
         reason = `one-sided`;
     } else if (leaderAsk < 0.54 || leaderAsk >= 0.75) {
         reason = `price ${(leaderAsk * 100).toFixed(0)}¢ outside 54-75¢`;
     } else if (isWeakMiddleZone) {
         reason = `price ${(leaderAsk * 100).toFixed(0)}¢ in excluded 60-64¢ bucket`;
-    } else if (isDeadHour) {
-        reason = `dead hour ${nowUtcHour}:00 UTC (12-14 or 18-20 UTC has no edge in sim)`;
     } else if (!leaderRising) {
         reason = `not rising`;
     } else if (signalCount < 2) {
-        // 1-signal trades: 66 trades, 64% WR, -$0.30/tr in sim (net losing sub-strategy)
-        // "rising" alone is not enough edge; need at least one other signal confirming.
+        // sigs=0: -$1.12/tr (45t). sigs=1: +$0.05/tr (234t). sigs>=2: +$0.81/tr (1480t).
+        // Validated on full 24-day dataset; smaller than 7-day sim claimed (+$0.15 vs +$0.30).
         reason = `sigs=${signalCount} < 2 (1-sig trades lose money)`;
-    } else if (crypto === 'BTC' && leaderSide === 'DOWN') {
-        // BTC has a severe directional bias in sim: UP leaders +$1.50/tr (59t, 76% WR),
-        // DOWN leaders -$0.78/tr (63t, 60% WR). Likely regime-dependent (current bull tape).
-        // Revisit if BTC regime changes. SOL/ETH/XRP show no such split.
-        reason = `BTC DOWN leader (-$0.78/tr in sim; regime-dependent filter)`;
-    } else if (crypto === 'ETH' && leaderAsk >= 0.65 && leaderAsk < 0.75) {
-        // ETH 65-74¢ was +$0.25/tr in sim (marginal) and the weakest zone in the crypto
-        // breakdown. Deployed after 2026-04-11 overnight drawdown where ETH 65-74¢ trades
-        // took the bulk of the damage (5-6 losses out of ~13 ETH fills). Real-money risk
-        // beats marginal sim edge.
-        reason = `ETH 65-74¢ filtered (marginal sim edge, concentrated live losses)`;
+    } else if (crypto === 'BTC' && leaderAsk >= 0.65 && leaderAsk < 0.75) {
+        // BTC 65-74¢: -$0.29/tr over 398 trades on full 24-day dataset.
+        // BTC 54-59¢ is +$2.23/tr — strongest single crypto zone in the data.
+        // BTC's edge is entirely in the low zone; the high zone is structurally negative on BOTH sides.
+        reason = `BTC 65-74¢ filtered (-$0.29/tr over 398 trades; structural negative on both sides)`;
     } else {
         action = 'TRADE';
         const parts: string[] = [prevMatchesFav ? 'prev=fav' : 'prev=dog', 'rising'];
@@ -499,7 +484,7 @@ async function main() {
     log(`Trade size: $${TRADE_SIZE_USD} | Max loss: $${MAX_LOSS_USD} | Trail: $${TRAIL_USD} from peak | Max trades: ${MAX_TRADES}`);
     log(`Sweep alert step: $${SWEEP_STEP_USD} above starting balance`);
     log(`Execution: maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)`);
-    log(`Filters: 54-59¢ + 65-74¢ | rising + sigs>=2 | skip 12-14,18-20 UTC | no BTC-DOWN | no ETH 65-74¢ | HOLD all`);
+    log(`Filters: 54-59¢ + 65-74¢ | rising + sigs>=2 | no BTC 65-74¢ | HOLD all`);
     log(`Signals: flip60, odd_flips, US_eve, cross>=2, weekend, sweet_zone, accelerating, depth>=2, late_flip`);
     log('='.repeat(60));
 
