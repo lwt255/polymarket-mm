@@ -397,6 +397,15 @@ function computeSignals(
         reason = `dead hour ${nowUtcHour}:00 UTC (12-14 or 18-20 UTC has no edge in sim)`;
     } else if (!leaderRising) {
         reason = `not rising`;
+    } else if (signalCount < 2) {
+        // 1-signal trades: 66 trades, 64% WR, -$0.30/tr in sim (net losing sub-strategy)
+        // "rising" alone is not enough edge; need at least one other signal confirming.
+        reason = `sigs=${signalCount} < 2 (1-sig trades lose money)`;
+    } else if (crypto === 'BTC' && leaderSide === 'DOWN') {
+        // BTC has a severe directional bias in sim: UP leaders +$1.50/tr (59t, 76% WR),
+        // DOWN leaders -$0.78/tr (63t, 60% WR). Likely regime-dependent (current bull tape).
+        // Revisit if BTC regime changes. SOL/ETH/XRP show no such split.
+        reason = `BTC DOWN leader (-$0.78/tr in sim; regime-dependent filter)`;
     } else {
         action = 'TRADE';
         const parts: string[] = [prevMatchesFav ? 'prev=fav' : 'prev=dog', 'rising'];
@@ -481,7 +490,7 @@ async function main() {
     log(`Mode: ${IS_LIVE ? '🔴 LIVE TRADING 🔴' : 'DRY RUN'}`);
     log(`Trade size: $${TRADE_SIZE_USD} | Max loss: $${MAX_LOSS_USD} | Max trades: ${MAX_TRADES}`);
     log(`Execution: maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)`);
-    log(`Filters: 54-59¢ + 65-74¢ | rising (required) | skip 12-14,18-20 UTC | HOLD all`);
+    log(`Filters: 54-59¢ + 65-74¢ | rising + sigs>=2 | skip 12-14,18-20 UTC | no BTC-DOWN | HOLD all`);
     log(`Signals: flip60, odd_flips, US_eve, cross>=2, weekend, sweet_zone, accelerating, depth>=2, late_flip`);
     log('='.repeat(60));
 
