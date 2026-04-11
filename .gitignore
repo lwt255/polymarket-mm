@@ -39,6 +39,7 @@ pricing-data.raw.jsonl
 pricing-data.rejected.jsonl
 pricing-data.jsonl.bak
 pricing-data.*.bak
+pricing-data.jsonl.bak.*
 pricing-data.pre-*.jsonl
 pricing-data.raw.pre-*.jsonl
 pricing-data.rejected.pre-*.jsonl
@@ -46,6 +47,7 @@ pricing-data.rejected.pre-*.jsonl
 # Trade logs (contain wallet activity)
 *-trades.jsonl
 *-trades.json
+*-trades.jsonl.bak*
 
 # Experiment/result data files
 *-results.json

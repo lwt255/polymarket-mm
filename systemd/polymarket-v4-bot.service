@@ -1,0 +1,33 @@
+[Unit]
+Description=Polymarket v4 Microstructure Bot (Live)
+After=network.target
+
+[Service]
+Type=simple
+User=polybot
+WorkingDirectory=/home/polybot/polymarket-mm
+ExecStart=/usr/bin/npx tsx src/scripts/crypto-5min/microstructure-bot.ts --live --size 10 --max-loss 60
+Restart=on-failure
+RestartSec=30
+Environment=NODE_ENV=production
+
+# Logging
+StandardOutput=append:/home/polybot/polymarket-mm/logs/v4-bot.log
+StandardError=append:/home/polybot/polymarket-mm/logs/v4-bot.log
+
+[Install]
+WantedBy=multi-user.target
+
+# ============================================================================
+# USAGE:
+# 1. Copy to /etc/systemd/system/polymarket-v4-bot.service on the VPS
+# 2. Adjust --size and --max-loss for current phase
+# 3. Run: systemctl daemon-reload
+# 4. Run: systemctl enable --now polymarket-v4-bot.service
+# 5. Check: systemctl status polymarket-v4-bot
+#
+# PHASE SIZING (from v4-scaling-plan.md):
+#   Phase 1: --size 10 --max-loss 40   (bankroll $500)
+#   Phase 2: --size 40 --max-loss 160  (bankroll $2000)
+#   Phase 3: --size 100 --max-loss 400 (bankroll $5000)
+# ============================================================================

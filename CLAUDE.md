@@ -5,16 +5,17 @@
 ---
 
 ## ⚡ Current Context
-- **Current State**: Microstructure bot v2 in DRY RUN (PID 88204). Collector needs restart for 5m-only prev fix.
-- **Strategy (CORRECTED)**: Buy T-30 leader in 50-75¢ zone when `prev=fav` (previous 5m candle resolved same direction). **65.8% WR, +$31/day at $10/trade, 8/13 winning days.** See `project_oos_validated_signals_2026_04_01.md` memory.
+- **Current State**: Bot stopped after max-loss hit. Collector running on VPS for 500+ trade paper validation.
+- **Infrastructure**: All long-running processes (collector, bots) now run on VPS with `systemd`, not local Mac.
+- **Strategy (CORRECTED)**: Buy T-30 leader in 54-75¢ zone, 9-signal system, no prev, no stops, maker orders. **65.8% WR, +$31/day at $10/trade, 8/13 winning days.** See `project_oos_validated_signals_2026_04_01.md` and `project_v4_strategy_2026_04_04.md` memories.
 - **Critical Lessons**:
   - Win rate alone is meaningless — must check $/trade. 82% WR across all prices = -$31 P&L.
   - Analysis scripts had bid/ask bug (30% inflation), leader-at-open bug, dedup bug, and prev-chaining bug. Original $200/day claim was really $31/day.
   - Claude's code reviews have missed bugs 5 times. Use Codex review plugin as second opinion.
 - **Old Strategies (DEAD)**: Underdog buying, CL-filtered favorite buying, all-price microstructure signals.
 - **Wallet**: ~$79 EOA.
-- **Collector**: PID 93903, `caffeinate -s nohup`, log: `logs/collector.log`. Needs restart for 5m-only prev fix.
-- **Microstructure Bot v2**: PID 88204, `caffeinate -s nohup`, log: `logs/microstructure-bot.log`. Dry run at $10/trade.
+- **Collector**: Running on VPS via `systemd`. Logs accessible via SSH.
+- **Microstructure Bot**: Stopped (max-loss). Will restart after paper validation completes.
 - **Key Scripts**: `verify-collector-resolution.ts` (spot-check), `verify-strategy-winrate.ts` (strategy verification), `backfill-onchain-resolution.ts` (historical fix).
 - **Codex Review**: Plugin installed globally. Use `/codex:review` or `/codex:adversarial-review` before trusting any analysis results.
 
@@ -37,6 +38,7 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 
 ### Core References
 - **[AGENTS.md](AGENTS.md)** - Mirror of this file for Codex/other agents
+- **[docs/v4-scaling-plan.md](docs/v4-scaling-plan.md)** - **READ BEFORE TOUCHING v4 CODE.** Laddered scaling plan ($10 → $500/trade across 5 phases), graduation/abort criteria, edge monitoring framework, discipline rules
 - **[journal/README.md](journal/README.md)** - Journal system usage
 - **[.env.example](.env.example)** - Environment variable template
 - **[docs/wallet-research-spec.md](docs/wallet-research-spec.md)** - Reverse-engineering spec for wallet behavior research
@@ -64,12 +66,26 @@ This is a **Polymarket prediction market bot system** for automated trading on P
 - **[src/scripts/wallet-underdog-strategy-robustness.ts](src/scripts/wallet-underdog-strategy-robustness.ts)** - Stress-test named underdog presets by crypto, interval, and market concentration
 - **[src/scripts/wallet-underdog-btc-eth-15m-report.ts](src/scripts/wallet-underdog-btc-eth-15m-report.ts)** - Compare the chosen underdog preset against the honest narrowed `BTC/ETH 15m` lane and its local baselines
 
-### Execution Bot (NEW — Mar 27)
-- **[src/scripts/crypto-5min/underdog-snipe-bot.ts](src/scripts/crypto-5min/underdog-snipe-bot.ts)** - Live underdog snipe bot. Buys underdog at T-30s with tight/medium/loose filters. Usage: `npx tsx src/scripts/crypto-5min/underdog-snipe-bot.ts [--live] [--size 10] [--max-loss 20] [--filter tight]`
+### Live Bots
+- **[src/scripts/crypto-5min/microstructure-bot.ts](src/scripts/crypto-5min/microstructure-bot.ts)** - **v4 live bot.** 9-signal system, buy leader at T-30, 54-75¢ zone, maker-first execution, hold to resolution (no stops). Usage: `npx tsx src/scripts/crypto-5min/microstructure-bot.ts --live --size 10 --max-loss 40`
+- **[src/scripts/crypto-5min/favorite-snipe-bot.ts](src/scripts/crypto-5min/favorite-snipe-bot.ts)** - Older favorite snipe bot (Portfolio B filters). Superseded by v4 microstructure-bot.
+- **[src/scripts/crypto-5min/underdog-snipe-bot.ts](src/scripts/crypto-5min/underdog-snipe-bot.ts)** - Live underdog snipe bot. DEPRECATED — edge was negative.
+- **[src/scripts/crypto-5min/preflight-live.ts](src/scripts/crypto-5min/preflight-live.ts)** - No-trade preflight: wallet/env/auth/balance/market/book checks. **Run before every live launch.**
+
+### Simulation & Monitoring
+- **[src/scripts/v4-sim.py](src/scripts/v4-sim.py)** - **v4 paper sim.** Runs 9-signal filter against `pricing-data.jsonl`. Usage: `python3 src/scripts/v4-sim.py <jsonl-file>`
+- **[src/scripts/v4-daily-monitor.py](src/scripts/v4-daily-monitor.py)** - Daily edge monitor (Layer 1). Cron runs at 00:07 UTC, appends to `monitoring/v4-daily.jsonl`. Usage: `python3 src/scripts/v4-daily-monitor.py [date|--all]`
+- **[src/scripts/v4-sim-audit.py](src/scripts/v4-sim-audit.py)** - Deep audit of v4 sim for bug hunting
+
+### Execution Infrastructure
 - **[src/core/execution/position-verifier.ts](src/core/execution/position-verifier.ts)** - On-chain USDC balance verification and hard max loss enforcement
 - **[src/core/execution/order-executor.ts](src/core/execution/order-executor.ts)** - Place orders and confirm fills via `getOpenOrders()` polling — never fire-and-forget
 - **[src/core/execution/trade-ledger.ts](src/core/execution/trade-ledger.ts)** - Append-only trade log (JSONL) with P&L reconciliation
 - **[src/core/clob-client.ts](src/core/clob-client.ts)** - Authenticated CLOB client singleton (viem + L2 API keys)
+
+### Launch Docs
+- **[docs/v4-live-checklist.md](docs/v4-live-checklist.md)** - Pre-launch, preflight, and first-session checklist
+- **[docs/v4-scaling-plan.md](docs/v4-scaling-plan.md)** - Laddered scaling plan and edge monitoring framework
 
 ---
 
@@ -104,33 +120,93 @@ systemd/            # VPS deployment templates
 
 ---
 
-## 🖥️ Process Management (Mac)
+## 🖥️ Process Management (VPS)
 
-Long-running processes (collector, bots) must use `caffeinate -s nohup` to survive terminal close and prevent Mac sleep:
+All long-running processes run on the **VPS** (`178.62.235.212`) with `systemd`. Local Mac is for development only.
 
+### VPS Connection
 ```bash
-# Start a bot (dry run) — APPEND to log, don't overwrite
-caffeinate -s nohup npx tsx src/scripts/crypto-5min/microstructure-bot.ts >> logs/microstructure-bot.log 2>&1 &
-
-# Start a bot (live)
-caffeinate -s nohup npx tsx src/scripts/crypto-5min/microstructure-bot.ts --live --size 10 >> logs/microstructure-bot.log 2>&1 &
-
-# Start the collector
-caffeinate -s nohup npx tsx src/scripts/pricing-collector.ts >> logs/collector.log 2>&1 &
-
-# Check if running
-ps aux | grep microstructure-bot | grep -v grep
-
-# Tail logs
-tail -f logs/microstructure-bot.log
-
-# Kill
-kill <PID>
+ssh root@178.62.235.212
 ```
 
-**Why both?** `nohup` keeps the process alive after terminal close. `caffeinate -s` prevents macOS system sleep. Without both, the bot dies on terminal exit or Mac sleep.
+### Services Running
 
-**Future**: Move to Raspberry Pi or VPS with `systemd` for proper process supervision (templates in `systemd/`).
+**1. Pricing Collector** (`polymarket-collector.service`)
+- User: `polybot`
+- Working dir: `/home/polybot/polymarket-mm`
+- Script: `src/scripts/pricing-collector.ts --continuous`
+- Log: `/home/polybot/polymarket-mm/logs/collector.log`
+- Data: `/home/polybot/polymarket-mm/pricing-data.jsonl`
+
+**2. v4 Microstructure Bot** (`polymarket-v4-bot.service`)
+- User: `polybot`
+- Working dir: `/home/polybot/polymarket-mm`
+- Script: `src/scripts/crypto-5min/microstructure-bot.ts --live --size 10 --max-loss 40`
+- Log: `/home/polybot/polymarket-mm/logs/v4-bot.log`
+- Trade ledger: `/home/polybot/polymarket-mm/microstructure-trades.jsonl` (**NEVER DELETE**)
+- Monitoring: `/home/polybot/polymarket-mm/monitoring/v4-daily.jsonl`
+- Preflight: `npx tsx src/scripts/crypto-5min/preflight-live.ts --max-loss 40`
+
+**3. Copy-Trade Bot** (`copy-trade-bot.service`)
+- User: `root`
+- Working dir: `/root/copy-trade-bot`
+- Script: `copy-trade-bot.ts` (standalone, not in repo)
+- Log: `/root/copy-trade-bot/copy-trade-bot.log`
+- Trade ledger: `/root/copy-trade-bot/copy-trades.jsonl` (**NEVER DELETE**)
+- State: `/root/copy-trade-bot/state/copy-trade-seen.json`
+- Auth: Bullpen CLI credentials at `/root/.bullpen/credentials.json`
+- Known issue: JWT expires every ~3 hours; auto-refresh built in but untested due to rate limiting
+
+### Common Commands
+```bash
+# Check service status
+ssh root@178.62.235.212 'systemctl status polymarket-collector'
+ssh root@178.62.235.212 'systemctl status polymarket-v4-bot'
+ssh root@178.62.235.212 'systemctl status copy-trade-bot'
+
+# Tail v4 bot logs (live)
+ssh root@178.62.235.212 'tail -30 /home/polybot/polymarket-mm/logs/v4-bot.log'
+
+# Tail collector logs
+ssh root@178.62.235.212 'tail -30 /home/polybot/polymarket-mm/logs/collector.log'
+
+# Tail copy-trade bot logs
+ssh root@178.62.235.212 'tail -30 /root/copy-trade-bot/copy-trade-bot.log'
+
+# Check v4 daily monitoring
+ssh root@178.62.235.212 'cat /home/polybot/polymarket-mm/monitoring/v4-daily.jsonl'
+
+# Check copy-trade ledger (NEVER delete this file)
+ssh root@178.62.235.212 'wc -l /root/copy-trade-bot/copy-trades.jsonl'
+
+# Restart (preserves trade data)
+ssh root@178.62.235.212 'systemctl restart copy-trade-bot'
+ssh root@178.62.235.212 'systemctl restart polymarket-collector'
+
+# Deploy updated copy-trade bot code
+scp src/scripts/copy-trade-bot.ts root@178.62.235.212:/root/copy-trade-bot/copy-trade-bot.ts
+ssh root@178.62.235.212 'systemctl restart copy-trade-bot'
+
+# Deploy updated v4 bot code
+scp src/scripts/crypto-5min/microstructure-bot.ts root@178.62.235.212:/home/polybot/polymarket-mm/src/scripts/crypto-5min/microstructure-bot.ts
+scp src/core/execution/position-verifier.ts root@178.62.235.212:/home/polybot/polymarket-mm/src/core/execution/position-verifier.ts
+scp src/core/execution/order-executor.ts root@178.62.235.212:/home/polybot/polymarket-mm/src/core/execution/order-executor.ts
+scp src/core/execution/trade-ledger.ts root@178.62.235.212:/home/polybot/polymarket-mm/src/core/execution/trade-ledger.ts
+scp src/core/clob-client.ts root@178.62.235.212:/home/polybot/polymarket-mm/src/core/clob-client.ts
+ssh root@178.62.235.212 'systemctl restart polymarket-v4-bot'
+
+# Deploy updated v4 sim/monitor scripts
+scp src/scripts/v4-sim.py root@178.62.235.212:/home/polybot/polymarket-mm/src/scripts/v4-sim.py
+scp src/scripts/v4-daily-monitor.py root@178.62.235.212:/home/polybot/polymarket-mm/src/scripts/v4-daily-monitor.py
+scp ~/.bullpen/credentials.json root@178.62.235.212:/root/.bullpen/credentials.json
+```
+
+### Local Development (Mac)
+For local testing only, use `caffeinate -s nohup`:
+```bash
+caffeinate -s nohup npx tsx src/scripts/crypto-5min/microstructure-bot.ts >> logs/microstructure-bot.log 2>&1 &
+caffeinate -s nohup npx tsx src/scripts/pricing-collector.ts >> logs/collector.log 2>&1 &
+```
 
 ---
 
@@ -292,4 +368,4 @@ const order = await client.createOrder({
 
 ---
 
-**Last Updated**: March 24, 2026
+**Last Updated**: April 6, 2026
