@@ -1,7 +1,7 @@
 /**
  * Microstructure Bot v4 — 9-Signal System
  *
- * Base filter: rising + 50-75¢ + two-sided (prev filter dropped — no edge historically)
+ * Base filter: rising + 54-59¢/65-74¢ + two-sided (60-64¢ excluded)
  *
  * 9 signals (5 original + 4 math-derived):
  *   1. flip60:       leader changed between T-60 and T-30
@@ -15,8 +15,9 @@
  *   9. late_flip:    leader at T-240 was different side (late momentum shift)
  *
  * Mechanics:
- *   - Stop loss at -5¢: if leader bid drops 5¢ below entry ask, exit
- *   - Skip stop on 4+ signal trades (high conviction, hold)
+ *   - HOLD all trades to resolution (no stops — stops cut winners more than they save)
+ *   - Stop levels logged as informational only (what stop WOULD have done)
+ *   - Maker-first execution: bid+1¢, 12s; taker fallback: ask, 10s
  *   - Signal count logged per trade for position sizing analysis
  *
  * Usage:
@@ -349,7 +350,6 @@ function computeSignals(
 
     // v4 math signal: strong_depth — leader bid depth / ask depth >= 2.0
     const leaderBidDepth = leaderSide === 'UP' ? snapT30.upBidDepth : snapT30.downBidDepth;
-    const leaderAskDepth = leaderSide === 'UP' ? snapT30.upAskDepth : snapT30.downAskDepth;
     const strongDepth = leaderAskDepth > 0 && (leaderBidDepth / leaderAskDepth) >= 2.0;
 
     // v4 math signal: late_flip — leader at T-240 was different from leader at T-30
@@ -378,10 +378,23 @@ function computeSignals(
     const followerBid = leaderSide === 'UP' ? snapT30.downBid : snapT30.upBid;
     const isTwoSided = followerBid >= 0.05 && leaderAsk < 0.97 && leaderAsk > 0.03;
 
+    const isWeakMiddleZone = leaderAsk >= 0.60 && leaderAsk < 0.65;
+
+    // Time-of-day filter: skip hours where the 9-signal filter has no edge or is net-negative
+    //   - 12-14 UTC (8-10am ET): 64.6% WR at 64.5¢ → breakeven; -$0.11/tr over 79 sim trades
+    //   - 18-20 UTC (2-4pm ET): 58.8% WR at 64.6¢ → 5.9pp below breakeven; -$0.92/tr over 80 sim trades
+    // Both buckets are tracked in monitoring; revisit if 2+ weeks of fresh data shows them flipping positive.
+    const nowUtcHour = new Date().getUTCHours();
+    const isDeadHour = (nowUtcHour >= 12 && nowUtcHour < 15) || (nowUtcHour >= 18 && nowUtcHour < 21);
+
     if (!isTwoSided) {
         reason = `one-sided`;
     } else if (leaderAsk < 0.54 || leaderAsk >= 0.75) {
         reason = `price ${(leaderAsk * 100).toFixed(0)}¢ outside 54-75¢`;
+    } else if (isWeakMiddleZone) {
+        reason = `price ${(leaderAsk * 100).toFixed(0)}¢ in excluded 60-64¢ bucket`;
+    } else if (isDeadHour) {
+        reason = `dead hour ${nowUtcHour}:00 UTC (12-14 or 18-20 UTC has no edge in sim)`;
     } else if (!leaderRising) {
         reason = `not rising`;
     } else {
@@ -420,8 +433,8 @@ function computeSignals(
 
 // ── Auto-Redeem ───────────────────────────────────────────────────────
 
-async function redeemPosition(conditionId: string, viemWalletClient: any, viemPublicClient: any) {
-    if (!conditionId) return;
+async function redeemPosition(conditionId: string, viemWalletClient: any, viemPublicClient: any): Promise<boolean> {
+    if (!conditionId) return false;
     const maxWaitMs = 120000;
     const pollInterval = 10000;
     const deadline = Date.now() + maxWaitMs;
@@ -438,21 +451,26 @@ async function redeemPosition(conditionId: string, viemWalletClient: any, viemPu
         await sleep(pollInterval);
     }
 
-    try {
-        const hash = await viemWalletClient.writeContract({
-            address: CT_ADDRESS, abi: ctRedeemAbi,
-            functionName: 'redeemPositions',
-            args: [USDC_CT, ZERO_BYTES32, conditionId as `0x${string}`, [1n, 2n]],
-        });
-        const receipt = await viemPublicClient.waitForTransactionReceipt({ hash });
-        if (receipt.status === 'success') {
-            log(`  Redeemed (tx: ${hash.slice(0, 14)}...)`);
-        } else {
-            log(`  Redeem tx REVERTED (tx: ${hash.slice(0, 14)}...)`);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const hash = await viemWalletClient.writeContract({
+                address: CT_ADDRESS, abi: ctRedeemAbi,
+                functionName: 'redeemPositions',
+                args: [USDC_CT, ZERO_BYTES32, conditionId as `0x${string}`, [1n, 2n]],
+            });
+            const receipt = await viemPublicClient.waitForTransactionReceipt({ hash });
+            if (receipt.status === 'success') {
+                log(`  Redeemed (tx: ${hash.slice(0, 14)}...)`);
+                return true;
+            }
+            log(`  Redeem tx REVERTED (attempt ${attempt}/3, tx: ${hash.slice(0, 14)}...)`);
+        } catch (err: any) {
+            log(`  Redeem failed (attempt ${attempt}/3): ${err.message?.slice(0, 60)}`);
         }
-    } catch (err: any) {
-        log(`  Redeem failed: ${err.message?.slice(0, 60)}`);
+        if (attempt < 3) await sleep(3000);
     }
+
+    return false;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────
@@ -463,7 +481,7 @@ async function main() {
     log(`Mode: ${IS_LIVE ? '🔴 LIVE TRADING 🔴' : 'DRY RUN'}`);
     log(`Trade size: $${TRADE_SIZE_USD} | Max loss: $${MAX_LOSS_USD} | Max trades: ${MAX_TRADES}`);
     log(`Execution: maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)`);
-    log(`Filters: 54-75¢ | rising (required) | no prev filter | HOLD all`);
+    log(`Filters: 54-59¢ + 65-74¢ | rising (required) | skip 12-14,18-20 UTC | HOLD all`);
     log(`Signals: flip60, odd_flips, US_eve, cross>=2, weekend, sweet_zone, accelerating, depth>=2, late_flip`);
     log('='.repeat(60));
 
@@ -539,6 +557,8 @@ async function main() {
     let tradesExecuted = 0;
     let halted = false;
     const sessionTradedSlugs = new Set<string>();
+    const pendingRedeems = new Set<string>();
+    let lastRedeemRetryAt = 0;
 
     // L1 bracket trade state
     interface L1BracketTrade {
@@ -582,6 +602,15 @@ async function main() {
 
     // ── Main Loop ──
     while (tradesExecuted < MAX_TRADES && !halted) {
+        if (IS_LIVE && viemWalletClient && viemPublicClient && pendingRedeems.size > 0 && Date.now() - lastRedeemRetryAt >= 30000) {
+            lastRedeemRetryAt = Date.now();
+            log(`Retrying ${pendingRedeems.size} pending redeem(s)...`);
+            for (const conditionId of [...pendingRedeems]) {
+                const redeemed = await redeemPosition(conditionId, viemWalletClient, viemPublicClient);
+                if (redeemed) pendingRedeems.delete(conditionId);
+            }
+        }
+
         const markets = await findCurrentMarkets();
         if (markets.length === 0) { await sleep(10000); continue; }
 
@@ -708,6 +737,7 @@ async function main() {
                         tokenId, makerPrice, TRADE_SIZE_USD,
                         async () => (await getBookInfo(tokenId)).bestAsk,
                         log,
+                        0.75, // max taker price — never pay outside the sweet zone
                     );
                     log(`    Order: ${execResult.status} (${execResult.fillType}) | ${execResult.fillSize} shares @${execResult.fillPrice}`);
                     if (execResult.status === 'ERROR') log(`    Error: ${execResult.error}`);
@@ -831,7 +861,13 @@ async function main() {
                     log(`  ${crypto} ${interval}m: ${resultStr} — bought ${signals.leaderSide} @${(signals.leaderAsk * 100).toFixed(0)}¢, resolved ${resolution} | PnL: $${expectedPnl.toFixed(2)} [${signals.reason}] ${signals.signalCount}sig${stopStr}${acctStr}`);
 
                     if (IS_LIVE && viemWalletClient && conditionId) {
-                        await redeemPosition(conditionId, viemWalletClient, viemPublicClient);
+                        const redeemed = await redeemPosition(conditionId, viemWalletClient, viemPublicClient);
+                        if (redeemed) {
+                            pendingRedeems.delete(conditionId);
+                        } else {
+                            pendingRedeems.add(conditionId);
+                            log(`  Queued redeem retry for ${conditionId.slice(0, 14)}...`);
+                        }
                         await sleep(2000); // wait for RPC to reflect redeemed USDC
                     }
 
@@ -924,7 +960,8 @@ async function main() {
             try {
                 const data = await fetchJSON(`${GAMMA}/markets?slug=${slug}`);
                 if (data?.[0]?.conditionId) {
-                    await redeemPosition(data[0].conditionId, viemWalletClient, viemPublicClient);
+                    const redeemed = await redeemPosition(data[0].conditionId, viemWalletClient, viemPublicClient);
+                    if (redeemed) pendingRedeems.delete(data[0].conditionId);
                 }
             } catch {}
         }

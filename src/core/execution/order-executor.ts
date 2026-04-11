@@ -165,6 +165,7 @@ export class OrderExecutor {
         sizeUsd: number,
         getAskPrice: () => Promise<number>,
         log?: (msg: string) => void,
+        maxTakerPrice?: number,
     ): Promise<FallbackResult> {
         const shares = Math.floor(sizeUsd / makerPrice);
         if (shares < 1) {
@@ -235,6 +236,17 @@ export class OrderExecutor {
                 status: 'UNFILLED', orderId, fillPrice: 0, fillSize: 0, fillCost: 0,
                 requestedPrice: makerPrice, requestedShares: shares,
                 error: 'Failed to read ask for taker fallback',
+                timestamps: { orderPlaced, confirmationReceived: Date.now() },
+                fillType: 'UNFILLED',
+            };
+        }
+
+        if (maxTakerPrice && takerPrice > maxTakerPrice) {
+            log?.(`    Taker ask ${(takerPrice * 100).toFixed(0)}¢ > max ${(maxTakerPrice * 100).toFixed(0)}¢ — skipping`);
+            return {
+                status: 'UNFILLED', orderId, fillPrice: 0, fillSize: 0, fillCost: 0,
+                requestedPrice: takerPrice, requestedShares: 0,
+                error: `Taker price ${takerPrice} exceeds max ${maxTakerPrice}`,
                 timestamps: { orderPlaced, confirmationReceived: Date.now() },
                 fillType: 'UNFILLED',
             };
