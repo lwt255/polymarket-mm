@@ -51,6 +51,8 @@ function getArg(name: string, defaultVal: string): string {
 
 const TRADE_SIZE_USD = parseFloat(getArg('--size', '10'));
 const MAX_LOSS_USD = parseFloat(getArg('--max-loss', '40'));
+const TRAIL_USD = parseFloat(getArg('--trail', '25'));
+const SWEEP_STEP_USD = parseFloat(getArg('--sweep-step', '20'));
 const MAX_TRADES = parseInt(getArg('--max-trades', '500'));
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -488,7 +490,8 @@ async function main() {
     log('='.repeat(60));
     log(`MICROSTRUCTURE BOT v4 — 9-Signal System`);
     log(`Mode: ${IS_LIVE ? '🔴 LIVE TRADING 🔴' : 'DRY RUN'}`);
-    log(`Trade size: $${TRADE_SIZE_USD} | Max loss: $${MAX_LOSS_USD} | Max trades: ${MAX_TRADES}`);
+    log(`Trade size: $${TRADE_SIZE_USD} | Max loss: $${MAX_LOSS_USD} | Trail: $${TRAIL_USD} from peak | Max trades: ${MAX_TRADES}`);
+    log(`Sweep alert step: $${SWEEP_STEP_USD} above starting balance`);
     log(`Execution: maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)`);
     log(`Filters: 54-59¢ + 65-74¢ | rising + sigs>=2 | skip 12-14,18-20 UTC | no BTC-DOWN | HOLD all`);
     log(`Signals: flip60, odd_flips, US_eve, cross>=2, weekend, sweet_zone, accelerating, depth>=2, late_flip`);
@@ -519,9 +522,9 @@ async function main() {
         viemWalletClient = createWalletClient({ account: viemAccount, chain: polygon, transport: http('https://polygon.drpc.org') });
 
         verifier = new PositionVerifier(wallet.address);
-        const initOk = await verifier.initialize(MAX_LOSS_USD);
+        const initOk = await verifier.initialize(MAX_LOSS_USD, TRAIL_USD);
         if (!initOk) { log('FATAL: Could not read balance. Aborting.'); process.exit(1); }
-        log(`Balance: $${verifier.getStartingBalance().toFixed(2)} | Floor: $${verifier.getFloorBalance().toFixed(2)}`);
+        log(`Balance: $${verifier.getStartingBalance().toFixed(2)} | Floor: $${verifier.getFloorBalance().toFixed(2)} | Trail: $${TRAIL_USD} from peak`);
         if (verifier.getStartingBalance() < MIN_BALANCE_USD) { log('Balance too low.'); process.exit(1); }
     }
 
@@ -565,6 +568,7 @@ async function main() {
     let evaluatedEndTimes = new Set<number>();
     let tradesExecuted = 0;
     let halted = false;
+    let nextSweepAlertLevel = SWEEP_STEP_USD; // next $ above starting balance to trigger sweep alert
     const sessionTradedSlugs = new Set<string>();
     const pendingRedeems = new Set<string>();
     let lastRedeemRetryAt = 0;
@@ -696,7 +700,19 @@ async function main() {
             if (IS_LIVE && verifier) {
                 const lossCheck = await verifier.checkMaxLoss();
                 if (!lossCheck.safe) { log(`HALT: ${lossCheck.reason}`); halted = true; break; }
-                log(`Balance: $${lossCheck.currentBalance.toFixed(2)} (loss: $${lossCheck.loss.toFixed(2)} / max $${MAX_LOSS_USD})`);
+                const startBal = verifier.getStartingBalance();
+                const gain = lossCheck.currentBalance - startBal;
+                const peakGain = lossCheck.peakBalance - startBal;
+                const floorStr = lossCheck.trailActive
+                    ? `trail floor $${lossCheck.floorBalance.toFixed(2)} (peak $${lossCheck.peakBalance.toFixed(2)} - $${TRAIL_USD})`
+                    : `floor $${lossCheck.floorBalance.toFixed(2)} (max loss $${MAX_LOSS_USD})`;
+                log(`Balance: $${lossCheck.currentBalance.toFixed(2)} | session ${gain >= 0 ? '+' : ''}$${gain.toFixed(2)} | peak +$${peakGain.toFixed(2)} | ${floorStr}`);
+
+                // Sweep alert: each time session gain clears the next $SWEEP_STEP threshold, log once.
+                while (gain >= nextSweepAlertLevel) {
+                    log(`  💰 SWEEP READY: session +$${gain.toFixed(2)} ≥ $${nextSweepAlertLevel} — consider withdrawing $${SWEEP_STEP_USD} to cold wallet`);
+                    nextSweepAlertLevel += SWEEP_STEP_USD;
+                }
             }
 
             const soonestMarkets = markets.filter(m => new Date(m.market.endDate).getTime() === soonestEnd);

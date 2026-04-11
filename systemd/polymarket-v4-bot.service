@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=polybot
 WorkingDirectory=/home/polybot/polymarket-mm
-ExecStart=/usr/bin/npx tsx src/scripts/crypto-5min/microstructure-bot.ts --live --size 10 --max-loss 60
+ExecStart=/usr/bin/npx tsx src/scripts/crypto-5min/microstructure-bot.ts --live --size 10 --max-loss 60 --trail 25 --sweep-step 20
 Restart=on-failure
 RestartSec=30
 Environment=NODE_ENV=production

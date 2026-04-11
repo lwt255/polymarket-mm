@@ -24,6 +24,8 @@ export interface MaxLossCheck {
     currentBalance: number;
     floorBalance: number;
     loss: number;
+    peakBalance: number;
+    trailActive: boolean;  // true when the trailing stop is the binding floor
     reason?: string;       // why it's not safe (if applicable)
 }
 
@@ -40,6 +42,8 @@ export class PositionVerifier {
     private startingBalance: number = -1;
     private floorBalance: number = -1;
     private lastVerifiedBalance: number = -1;
+    private peakBalance: number = -1;
+    private trailingAmountUsd: number = 0;
 
     constructor(walletAddress: string, rpcUrl: string = 'https://polygon.drpc.org') {
         this.walletAddress = walletAddress as `0x${string}`;
@@ -79,13 +83,15 @@ export class PositionVerifier {
      * Initialize the verifier by reading starting balance and setting floor.
      * Must be called before any trading. Returns false if balance read fails.
      */
-    async initialize(maxLossUsd: number): Promise<boolean> {
+    async initialize(maxLossUsd: number, trailingAmountUsd: number = 0): Promise<boolean> {
         const check = await this.getBalance();
         if (!check.success || check.balance < 0) {
             return false;
         }
         this.startingBalance = check.balance;
+        this.peakBalance = check.balance;
         this.floorBalance = check.balance - maxLossUsd;
+        this.trailingAmountUsd = trailingAmountUsd;
         return true;
     }
 
@@ -100,6 +106,8 @@ export class PositionVerifier {
                 currentBalance: -1,
                 floorBalance: this.floorBalance,
                 loss: 0,
+                peakBalance: this.peakBalance,
+                trailActive: false,
                 reason: 'Verifier not initialized — call initialize() first',
             };
         }
@@ -111,19 +119,43 @@ export class PositionVerifier {
                 currentBalance: -1,
                 floorBalance: this.floorBalance,
                 loss: 0,
+                peakBalance: this.peakBalance,
+                trailActive: false,
                 reason: 'On-chain balance read FAILED — refusing to trade when blind',
             };
         }
 
+        if (check.balance > this.peakBalance) this.peakBalance = check.balance;
+
+        // Effective floor: trailing stop only binds once we've been above starting balance.
+        // Until then, the original fixed floor applies.
+        let effectiveFloor = this.floorBalance;
+        let trailActive = false;
+        if (this.trailingAmountUsd > 0 && this.peakBalance > this.startingBalance) {
+            const trailFloor = this.peakBalance - this.trailingAmountUsd;
+            if (trailFloor > effectiveFloor) {
+                effectiveFloor = trailFloor;
+                trailActive = true;
+            }
+        }
+
         const loss = this.startingBalance - check.balance;
-        const safe = check.balance > this.floorBalance;
+        const safe = check.balance > effectiveFloor;
+
+        const reason = safe
+            ? undefined
+            : trailActive
+                ? `Trailing stop hit: balance $${check.balance.toFixed(2)} <= trail floor $${effectiveFloor.toFixed(2)} (peak $${this.peakBalance.toFixed(2)} - $${this.trailingAmountUsd} trail)`
+                : `Balance $${check.balance.toFixed(2)} <= floor $${effectiveFloor.toFixed(2)} (loss: $${loss.toFixed(2)})`;
 
         return {
             safe,
             currentBalance: check.balance,
-            floorBalance: this.floorBalance,
+            floorBalance: effectiveFloor,
             loss,
-            reason: safe ? undefined : `Balance $${check.balance.toFixed(2)} <= floor $${this.floorBalance.toFixed(2)} (loss: $${loss.toFixed(2)})`,
+            peakBalance: this.peakBalance,
+            trailActive,
+            reason,
         };
     }
 
@@ -143,5 +175,6 @@ export class PositionVerifier {
     getStartingBalance(): number { return this.startingBalance; }
     getFloorBalance(): number { return this.floorBalance; }
     getLastVerifiedBalance(): number { return this.lastVerifiedBalance; }
+    getPeakBalance(): number { return this.peakBalance; }
     getWalletAddress(): string { return this.walletAddress; }
 }
