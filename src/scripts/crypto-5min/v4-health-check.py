@@ -46,7 +46,9 @@ LOG_STALE_SECONDS = 300          # 5 min without a log line = zombie
 RECENT_LOG_WINDOW_SECONDS = 3600 # look at last hour for error patterns
 ERROR_REPEAT_THRESHOLD = 3       # N+ repeated errors in window = alert
 TRAIL_PROXIMITY_USD = 5.0        # balance within $5 of trail floor = warn
-CHAINLINK_STALE_SECONDS = 900    # no CL messages in 15 min = warn (allows for 5m candle gaps + bootstrap)
+# (chainlink check removed — CL: snapshots only fire at bootstrap, not per candle.
+# If Chainlink actually breaks, log freshness catches it: the bot can't evaluate
+# candles without Chainlink, so new log lines stop appearing.)
 
 STATUS_OK = "ok"
 STATUS_WARN = "warn"
@@ -246,27 +248,6 @@ def check_trail_proximity(tail: str) -> dict:
                 "detail": {"balance": last_bal, "floor": last_floor, "cushion": cushion}}
     return {"name": "trail", "status": STATUS_OK, "message": f"armed, ${cushion:.2f} cushion"}
 
-def check_chainlink(tail: str) -> dict:
-    # The `[Chainlink] ...` log lines come from the chainlink library and lack
-    # a `[HH:MM:SS]` prefix, so we can't date them. Use the bot's own
-    # `CL: btc/usd=...` lines instead, which do have timestamps and fire
-    # every candle when the bot reads the feed.
-    pat = re.compile(r"CL:\s+\w+/usd")
-    last_cl = None
-    for line in reversed(tail.splitlines()):
-        if pat.search(line):
-            ts = parse_log_timestamp(line)
-            if ts:
-                last_cl = ts
-                break
-    if last_cl is None:
-        return {"name": "chainlink", "status": STATUS_WARN, "message": "no CL snapshots in recent log"}
-    age = seconds_since(last_cl)
-    if age > CHAINLINK_STALE_SECONDS:
-        return {"name": "chainlink", "status": STATUS_WARN,
-                "message": f"no CL snapshots in {age}s"}
-    return {"name": "chainlink", "status": STATUS_OK, "message": f"active ({age}s ago)"}
-
 # ── Orchestration ────────────────────────────────────────────────────
 
 def run_all_checks() -> dict:
@@ -278,7 +259,6 @@ def run_all_checks() -> dict:
         check_recent_halt_or_fatal(tail),
         check_repeated_errors(tail),
         check_trail_proximity(tail),
-        check_chainlink(tail),
     ]
     worst = STATUS_OK
     for c in checks:
@@ -301,7 +281,6 @@ def format_human(report: dict) -> str:
         "halt_fatal": "halts     ",
         "errors": "errors    ",
         "trail": "trail     ",
-        "chainlink": "chainlink ",
     }
     lines = []
     lines.append("─" * 45)
