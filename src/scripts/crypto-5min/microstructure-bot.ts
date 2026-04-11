@@ -408,6 +408,12 @@ function computeSignals(
         // DOWN leaders -$0.78/tr (63t, 60% WR). Likely regime-dependent (current bull tape).
         // Revisit if BTC regime changes. SOL/ETH/XRP show no such split.
         reason = `BTC DOWN leader (-$0.78/tr in sim; regime-dependent filter)`;
+    } else if (crypto === 'ETH' && leaderAsk >= 0.65 && leaderAsk < 0.75) {
+        // ETH 65-74¢ was +$0.25/tr in sim (marginal) and the weakest zone in the crypto
+        // breakdown. Deployed after 2026-04-11 overnight drawdown where ETH 65-74¢ trades
+        // took the bulk of the damage (5-6 losses out of ~13 ETH fills). Real-money risk
+        // beats marginal sim edge.
+        reason = `ETH 65-74¢ filtered (marginal sim edge, concentrated live losses)`;
     } else {
         action = 'TRADE';
         const parts: string[] = [prevMatchesFav ? 'prev=fav' : 'prev=dog', 'rising'];
@@ -493,7 +499,7 @@ async function main() {
     log(`Trade size: $${TRADE_SIZE_USD} | Max loss: $${MAX_LOSS_USD} | Trail: $${TRAIL_USD} from peak | Max trades: ${MAX_TRADES}`);
     log(`Sweep alert step: $${SWEEP_STEP_USD} above starting balance`);
     log(`Execution: maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)`);
-    log(`Filters: 54-59¢ + 65-74¢ | rising + sigs>=2 | skip 12-14,18-20 UTC | no BTC-DOWN | HOLD all`);
+    log(`Filters: 54-59¢ + 65-74¢ | rising + sigs>=2 | skip 12-14,18-20 UTC | no BTC-DOWN | no ETH 65-74¢ | HOLD all`);
     log(`Signals: flip60, odd_flips, US_eve, cross>=2, weekend, sweet_zone, accelerating, depth>=2, late_flip`);
     log('='.repeat(60));
 
