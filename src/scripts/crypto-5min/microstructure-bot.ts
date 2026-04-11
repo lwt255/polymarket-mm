@@ -986,6 +986,13 @@ async function main() {
             if (swept.success) log(`Post-sweep balance: $${swept.balance.toFixed(2)}`);
         }
     }
+
+    // Force clean exit. Without this, open handles (Chainlink WebSocket, keep-alive
+    // connections) hold the process alive indefinitely and the halt doesn't actually stop
+    // the bot from systemd's perspective. Exit 0 so Restart=on-failure doesn't auto-respawn
+    // — a halt is a deliberate stop and should require the user to restart.
+    log('Exiting cleanly.');
+    process.exit(0);
 }
 
 main().catch(err => { log(`FATAL: ${err.message}`); process.exit(1); });
