@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Polymarket v4 Bot Watchdog every 2 minutes
+Requires=polymarket-v4-watchdog.service
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Unit=polymarket-v4-watchdog.service
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

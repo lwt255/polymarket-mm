@@ -1,0 +1,23 @@
+[Unit]
+Description=Polymarket v4 Bot Watchdog (single run)
+After=polymarket-v4-bot.service
+
+[Service]
+Type=oneshot
+User=polybot
+WorkingDirectory=/home/polybot/polymarket-mm
+EnvironmentFile=-/etc/polymarket-watchdog.env
+ExecStart=/usr/bin/python3 /home/polybot/polymarket-mm/src/scripts/crypto-5min/v4-health-check.py --alert
+# Exit code 1 (warnings) and 2 (broken) are expected — don't treat as unit failure
+SuccessExitStatus=0 1 2
+StandardOutput=append:/home/polybot/polymarket-mm/logs/v4-watchdog.log
+StandardError=append:/home/polybot/polymarket-mm/logs/v4-watchdog.log
+
+# ============================================================================
+# USAGE:
+# 1. Create /etc/polymarket-watchdog.env with:
+#      NTFY_TOPIC=<your-topic-here>
+# 2. Copy both .service and .timer files to /etc/systemd/system/
+# 3. systemctl daemon-reload
+# 4. systemctl enable --now polymarket-v4-watchdog.timer
+# ============================================================================
