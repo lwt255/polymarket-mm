@@ -661,7 +661,7 @@ async function resolveOutcome(slug: string, retries = 30): Promise<'UP' | 'DOWN'
 // --- Simulated Trade Analysis ---
 
 const TAKER_FEE_RATE = 0.001;  // 0.1%
-const GAS_COST_CENTS = 100;     // ~$1 per tx on Polygon
+const GAS_COST_CENTS = 13;      // ~$0.13 per tx on Polygon (verified from 72 live trades Apr 2026)
 
 function simulateTrades(snapshots: BookSnapshot[], resolution: 'UP' | 'DOWN' | 'UNKNOWN'): SimulatedTrade[] {
     if (resolution === 'UNKNOWN') return [];

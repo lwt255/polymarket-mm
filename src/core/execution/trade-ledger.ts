@@ -183,6 +183,8 @@ export class TradeLedger {
         if (dbCount.n === 0 && this.tradeCount > 0) {
             this.importJsonlToDb();
         }
+
+        this.hydrateSessionState();
     }
 
     private importJsonlToDb(): void {
@@ -238,6 +240,55 @@ export class TradeLedger {
             });
         } catch (e: any) {
             console.log(`[TradeLedger] DB insert failed: ${e.message}`);
+        }
+    }
+
+    private hydrateSessionState(): void {
+        try {
+            const rows = this.db.prepare(`
+                SELECT trade_number, raw_json
+                FROM trades
+                ORDER BY id
+            `).all() as any[];
+
+            if (rows.length === 0) {
+                this.tradeCount = 0;
+                this.sessionPnl = 0;
+                this.sessionWins = 0;
+                return;
+            }
+
+            const lastRow = rows[rows.length - 1];
+            this.tradeCount = Number(lastRow?.trade_number ?? rows.length);
+            this.sessionPnl = 0;
+            this.sessionWins = 0;
+
+            for (const row of rows) {
+                try {
+                    const raw = JSON.parse(row.raw_json);
+                    if (raw?.execution?.status === 'FILLED') {
+                        this.sessionPnl += Number(raw?.reconciliation?.actualPnl ?? raw?.expectedPnl ?? 0);
+                        if (raw?.won) this.sessionWins++;
+                    }
+                } catch {
+                    // Fall back to DB aggregates below if any row is malformed.
+                    const totals = this.db.prepare(`
+                        SELECT
+                            COALESCE(SUM(won), 0) as wins,
+                            COALESCE(SUM(expected_pnl), 0) as pnl
+                        FROM trades
+                        WHERE exec_status = 'FILLED'
+                    `).get() as any;
+
+                    this.sessionWins = Number(totals?.wins ?? 0);
+                    this.sessionPnl = Number(totals?.pnl ?? 0);
+                    return;
+                }
+            }
+        } catch (e: any) {
+            console.log(`[TradeLedger] Session hydrate failed: ${e.message}`);
+            this.sessionPnl = 0;
+            this.sessionWins = 0;
         }
     }
 

@@ -108,14 +108,23 @@ function getTokenIds(market: any): { upToken: string; downToken: string } | null
 
 async function getBookInfo(tokenId: string) {
     const raw = await fetchJSON(`${CLOB}/book?token_id=${tokenId}`);
-    if (!raw) return { bestBid: 0, bestAsk: 1, bids: [], asks: [] };
+    if (!raw) return { bestBid: 0, bestAsk: 1, bestAskSize: 0, bestBidSize: 0, totalAskDepth: 0, totalBidDepth: 0, bids: [], asks: [] };
     const bids = (raw.bids || []).map((b: any) => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
         .filter((b: any) => Number.isFinite(b.price) && b.size > 0)
         .sort((a: any, b: any) => b.price - a.price);
     const asks = (raw.asks || []).map((a: any) => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
         .filter((a: any) => Number.isFinite(a.price) && a.size > 0)
         .sort((a: any, b: any) => a.price - b.price);
-    return { bestBid: bids[0]?.price ?? 0, bestAsk: asks[0]?.price ?? 1, bids, asks };
+    return {
+        bestBid: bids[0]?.price ?? 0,
+        bestAsk: asks[0]?.price ?? 1,
+        bestAskSize: asks[0]?.size ?? 0,
+        bestBidSize: bids[0]?.size ?? 0,
+        totalAskDepth: asks.reduce((s: number, a: any) => s + a.size, 0),
+        totalBidDepth: bids.reduce((s: number, b: any) => s + b.size, 0),
+        bids,
+        asks,
+    };
 }
 
 // ── Market Discovery ──────────────────────────────────────────────────
@@ -147,8 +156,8 @@ async function findCurrentMarkets(): Promise<Array<{ market: any; crypto: typeof
             }
         })());
 
-        // 15-minute markets (only BTC — only one with edge)
-        if (crypto.slug === 'btc') {
+        // 15-minute markets (all cryptos — CL gate handles filtering)
+        {
             searches.push((async () => {
                 for (const ts of [rounded15, rounded15 + 900]) {
                     const slug = `${crypto.slug}-updown-15m-${ts}`;
@@ -255,6 +264,8 @@ interface MarketSnapshot {
     favoriteAsk: number;
     favoriteTokenId: string;
     favoriteMid: number;
+    favoriteAskSize: number;    // shares available at best ask
+    favoriteTotalDepth: number; // total ask-side depth
     isTwoSided: boolean;
     conditionId: string;
 }
@@ -274,6 +285,8 @@ async function snapshotMarket(market: any, crypto: typeof CRYPTOS[0], interval: 
     const favoriteAsk = favoriteSide === 'UP' ? upBook.bestAsk : downBook.bestAsk;
     const favoriteTokenId = favoriteSide === 'UP' ? tokens.upToken : tokens.downToken;
     const favoriteMid = favoriteSide === 'UP' ? upMid : downMid;
+    const favoriteAskSize = favoriteSide === 'UP' ? upBook.bestAskSize : downBook.bestAskSize;
+    const favoriteTotalDepth = favoriteSide === 'UP' ? upBook.totalAskDepth : downBook.totalAskDepth;
 
     const underdogAsk = favoriteSide === 'UP' ? downBook.bestAsk : upBook.bestAsk;
     const isTwoSided = underdogAsk > 0.03 && favoriteAsk < 0.97 && favoriteAsk > 0.03;
@@ -293,6 +306,8 @@ async function snapshotMarket(market: any, crypto: typeof CRYPTOS[0], interval: 
         favoriteAsk,
         favoriteTokenId,
         favoriteMid,
+        favoriteAskSize,
+        favoriteTotalDepth,
         isTwoSided,
         conditionId: market.conditionId || '',
     };
@@ -306,10 +321,17 @@ interface FilterResult {
     snapshot: MarketSnapshot;
 }
 
+/**
+ * Option D: Simple CL-gated favorite buying
+ *
+ * Rules: Any crypto, any interval (5m/15m), favorite at 50-80¢, Chainlink confirms.
+ * Backtest: 103 trades/day, 83% WR, +19pp buffer, $298/day at $10, 12/12 winning days.
+ */
 function evaluatePortfolioB(
     snapshot: MarketSnapshot,
     prevResolutions: Record<string, string>,
-    earlySnapshot: MarketSnapshot | null, // T-120 snapshot for drift
+    earlySnapshot: MarketSnapshot | null,
+    clConfirms: boolean,
 ): FilterResult {
     const { crypto, interval, favoriteSide, favoriteAsk, isTwoSided } = snapshot;
     const base = { snapshot };
@@ -318,64 +340,24 @@ function evaluatePortfolioB(
         return { ...base, pass: false, reason: `SKIP ${crypto}: one-sided` };
     }
 
-    // Price must be in the sweet spot (50-65¢)
-    if (favoriteAsk < 0.50 || favoriteAsk >= 0.65) {
-        return { ...base, pass: false, reason: `SKIP ${crypto} ${interval}m: fav @${(favoriteAsk * 100).toFixed(0)}¢ (outside 50-65¢)` };
+    // Favorite must be in 50-80¢ range
+    if (favoriteAsk < 0.50 || favoriteAsk >= 0.80) {
+        return { ...base, pass: false, reason: `SKIP ${crypto} ${interval}m: fav @${(favoriteAsk * 100).toFixed(0)}¢ (outside 50-80¢)` };
     }
 
-    // Calculate drift if we have early snapshot
-    const drift = earlySnapshot ? snapshot.favoriteMid - earlySnapshot.favoriteMid : 0;
-    const rising = drift > 0.02;
-    const prevRes = prevResolutions[crypto] || 'UNKNOWN';
-    const prevMatchesFav = prevRes === favoriteSide;
-    const hourUTC = new Date().getUTCHours();
-    const usHours = hourUTC >= 16 && hourUTC < 24;
-
-    // ── Portfolio B Rules ──
-
-    // ETH 5m: always trade at 55-65¢ (strongest edge: 71% WR)
-    if (crypto === 'ETH' && interval === 5 && favoriteAsk >= 0.55) {
-        return { ...base, pass: true, reason: `TRADE ${crypto} 5m: fav ${favoriteSide} @${(favoriteAsk * 100).toFixed(0)}¢ [ETH always-on]` };
+    // Depth check
+    const sharesNeeded = Math.floor(TRADE_SIZE_USD / favoriteAsk);
+    if (snapshot.favoriteAskSize < sharesNeeded) {
+        return { ...base, pass: false, reason: `SKIP ${crypto} ${interval}m: fav @${(favoriteAsk * 100).toFixed(0)}¢ — THIN (need ${sharesNeeded}sh, ${snapshot.favoriteAskSize.toFixed(0)}sh avail)` };
     }
 
-    // ETH 5m: 50-55¢ also positive but weaker — still include in Portfolio B
-    if (crypto === 'ETH' && interval === 5 && favoriteAsk >= 0.50) {
-        return { ...base, pass: true, reason: `TRADE ${crypto} 5m: fav ${favoriteSide} @${(favoriteAsk * 100).toFixed(0)}¢ [ETH 50-55¢]` };
+    // CL confirmation — the only filter that matters
+    if (!clConfirms) {
+        return { ...base, pass: false, reason: `SKIP ${crypto} ${interval}m: fav ${favoriteSide} @${(favoriteAsk * 100).toFixed(0)}¢ — CL contradicts` };
     }
 
-    // XRP 5m: always trade at 55-65¢ (66% WR)
-    if (crypto === 'XRP' && interval === 5 && favoriteAsk >= 0.55) {
-        return { ...base, pass: true, reason: `TRADE ${crypto} 5m: fav ${favoriteSide} @${(favoriteAsk * 100).toFixed(0)}¢ [XRP always-on]` };
-    }
-
-    // BTC 15m: always trade at 50-65¢ (85% WR, 10/10 days)
-    if (crypto === 'BTC' && interval === 15) {
-        return { ...base, pass: true, reason: `TRADE ${crypto} 15m: fav ${favoriteSide} @${(favoriteAsk * 100).toFixed(0)}¢ [BTC 15m always-on]` };
-    }
-
-    // BTC 5m: only when rising + US hours (71% WR with filters)
-    if (crypto === 'BTC' && interval === 5 && rising && usHours) {
-        return { ...base, pass: true, reason: `TRADE ${crypto} 5m: fav ${favoriteSide} @${(favoriteAsk * 100).toFixed(0)}¢ [BTC rising+US] drift=${(drift * 100).toFixed(1)}¢` };
-    }
-
-    // SOL 5m: only when rising + prev matches favorite (70% WR with filters)
-    if (crypto === 'SOL' && interval === 5 && rising && prevMatchesFav) {
-        return { ...base, pass: true, reason: `TRADE ${crypto} 5m: fav ${favoriteSide} @${(favoriteAsk * 100).toFixed(0)}¢ [SOL rising+prev=${prevRes}] drift=${(drift * 100).toFixed(1)}¢` };
-    }
-
-    // Default: skip
-    const skipReason = [];
-    if (crypto === 'BTC' && interval === 5) {
-        if (!rising) skipReason.push('not rising');
-        if (!usHours) skipReason.push(`hour=${hourUTC} not US`);
-    } else if (crypto === 'SOL') {
-        if (!rising) skipReason.push('not rising');
-        if (!prevMatchesFav) skipReason.push(`prev=${prevRes}≠fav=${favoriteSide}`);
-    } else if (crypto === 'XRP' && favoriteAsk < 0.55) {
-        skipReason.push(`ask ${(favoriteAsk*100).toFixed(0)}¢ < 55¢`);
-    }
-
-    return { ...base, pass: false, reason: `SKIP ${crypto} ${interval}m: fav @${(favoriteAsk * 100).toFixed(0)}¢ (${skipReason.join(', ') || 'no rule matched'})` };
+    const depthStr = `${snapshot.favoriteAskSize.toFixed(0)}sh@ask`;
+    return { ...base, pass: true, reason: `TRADE ${crypto} ${interval}m: fav ${favoriteSide} @${(favoriteAsk * 100).toFixed(0)}¢ CL✓ (${depthStr})` };
 }
 
 // ── Auto-Redeem ───────────────────────────────────────────────────────
@@ -425,7 +407,7 @@ async function main() {
     log('FAVORITE SNIPE BOT — Portfolio B');
     log(`Mode: ${IS_LIVE ? '🔴 LIVE TRADING' : '⚪ DRY RUN'}`);
     log(`Trade size: $${TRADE_SIZE_USD} | Max loss: $${MAX_LOSS_USD}`);
-    log(`Strategy: Buy favorite 50-65¢ | ETH+XRP always, BTC 15m always, BTC 5m+SOL filtered`);
+    log(`Strategy: Option D — Any crypto, 50-80¢, CL confirms | 83% WR, 103 T/day, $298/day target`);
     log('='.repeat(60));
 
     // ── Setup ──
@@ -467,13 +449,26 @@ async function main() {
 
     const ledger = new TradeLedger('favorite-snipe-trades.jsonl');
 
+    // Connect Chainlink for CL confirmation signal
+    log('Connecting to Chainlink price feeds...');
+    const chainlink = new ChainlinkFeed();
+    await chainlink.connect();
+    let clWait = 0;
+    while (chainlink.getPrice('btc/usd') === 0 && clWait < 30) { await sleep(1000); clWait++; }
+    await sleep(3000);
+    const clPrices = chainlink.getAllPrices();
+    log(`Chainlink: ${Object.entries(clPrices).map(([k, v]) => `${k}=$${v.toFixed(2)}`).join(' | ')}`);
+
     // Bootstrap prev resolutions via on-chain
     log('Bootstrapping previous resolutions (on-chain)...');
     const prevResolutions = await bootstrapPrevResolutions(viemPublicClient);
     log(`Prev: ${Object.entries(prevResolutions).map(([k, v]) => `${k}=${v}`).join(' | ')}`);
 
+    // Track CL open prices per candle end time
+    let clOpenByEndTime: Map<number, Record<string, number>> = new Map();
+
     // Track early snapshots for drift calculation
-    let earlySnapshots: Map<string, MarketSnapshot> = new Map(); // crypto+interval -> first snapshot
+    let earlySnapshots: Map<string, MarketSnapshot> = new Map();
     let evaluatedEndTimes = new Set<number>();
     let tradesExecuted = 0;
     let halted = false;
@@ -509,7 +504,17 @@ async function main() {
                         earlySnapshots.set(key, snap);
                     }
                 }
+
+                // Record CL open price for this candle batch
+                if (!clOpenByEndTime.has(soonestEnd)) {
+                    const opens: Record<string, number> = {};
+                    for (const c of CRYPTOS) { opens[c.name] = chainlink.getPrice(c.clSymbol); }
+                    clOpenByEndTime.set(soonestEnd, opens);
+                }
             }
+
+            // Clean up old CL opens (>20 min ago)
+            for (const [et] of clOpenByEndTime) { if (et < Date.now() - 20 * 60 * 1000) clOpenByEndTime.delete(et); }
 
             // Log every 30s
             if (secsLeft % 30 < 12) {
@@ -537,14 +542,31 @@ async function main() {
             const candidates: FilterResult[] = [];
             const soonestMarkets = markets.filter(m => new Date(m.market.endDate).getTime() === soonestEnd);
 
+            // Compute CL confirmation for each crypto
+            const clOpens = clOpenByEndTime.get(soonestEnd) || {};
+            const clConfirmations: Record<string, boolean> = {};
+            for (const c of CRYPTOS) {
+                const openPrice = clOpens[c.name] || 0;
+                const currentPrice = chainlink.getPrice(c.clSymbol);
+                const clMove = currentPrice - openPrice;
+                // We'll check per-market after we know which side is favorite
+                clConfirmations[c.name] = true; // placeholder, computed per snap below
+            }
+
             for (const { market, crypto, interval } of soonestMarkets) {
                 const snap = await snapshotMarket(market, crypto, interval);
                 if (!snap) continue;
 
+                // CL confirmation: is Chainlink moving in the same direction as the favorite?
+                const openPrice = clOpens[crypto.name] || 0;
+                const currentPrice = chainlink.getPrice(crypto.clSymbol);
+                const clMove = currentPrice - openPrice;
+                const clConfirms = (snap.favoriteSide === 'UP' && clMove > 0) || (snap.favoriteSide === 'DOWN' && clMove < 0);
+
                 const key = `${crypto.name}-${interval}`;
                 const early = earlySnapshots.get(key) || null;
-                const result = evaluatePortfolioB(snap, prevResolutions, early);
-                log(`  ${result.reason}`);
+                const result = evaluatePortfolioB(snap, prevResolutions, early, clConfirms);
+                log(`  ${result.reason}${openPrice > 0 ? ` [CL: $${openPrice.toFixed(2)}→$${currentPrice.toFixed(2)} ${clMove >= 0 ? '+' : ''}$${clMove.toFixed(2)}]` : ''}`);
                 if (result.pass) candidates.push(result);
             }
 
@@ -563,9 +585,13 @@ async function main() {
 
                     let execResult;
                     if (IS_LIVE && executor) {
+                        // Bump 1¢ on all cryptos to improve fill rate
+                        // Proven on SOL: 33% → 88% fill rate. Cost: ~$0.15/trade.
+                        const execPrice = Math.min(snap.favoriteAsk + 0.01, 0.99);
+                        log(`    Price bump: ${(snap.favoriteAsk * 100).toFixed(0)}¢ → ${(execPrice * 100).toFixed(0)}¢`);
                         execResult = await executor.executeAndConfirm(
                             snap.favoriteTokenId,
-                            snap.favoriteAsk,
+                            execPrice,
                             TRADE_SIZE_USD,
                         );
                         log(`    Order: ${execResult.status} | ${execResult.fillSize} shares @${execResult.fillPrice}`);
