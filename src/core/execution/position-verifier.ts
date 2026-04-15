@@ -13,6 +13,10 @@ import { polygon } from 'viem/chains';
 const USDC_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174' as `0x${string}`;
 const USDC_ABI = parseAbi(['function balanceOf(address account) view returns (uint256)']);
 
+// Polymarket conditional tokens (ERC-1155) on Polygon
+const CT_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045' as `0x${string}`;
+const CT_ABI = parseAbi(['function balanceOf(address account, uint256 id) view returns (uint256)']);
+
 export interface BalanceCheck {
     balance: number;       // USDC balance in dollars
     success: boolean;      // whether the on-chain read succeeded
@@ -166,10 +170,33 @@ export class PositionVerifier {
     reconcile(expectedPnl: number, balanceBefore: number, balanceAfter: number): ReconcileResult {
         const actualPnl = balanceAfter - balanceBefore;
         const discrepancy = Math.abs(actualPnl - expectedPnl);
-        // Alert if discrepancy is more than $0.50 (allows for gas/rounding)
-        const alert = discrepancy > 0.50;
+        // Threshold covers redeem tx gas (~$0.50) + maker-vs-taker slippage +
+        // rounding. Real phantom fills / double orders land $5+ off at $10/trade,
+        // so $2.50 catches those without false-positiving on normal friction.
+        const alert = discrepancy > 2.50;
 
         return { expectedPnl, actualPnl, discrepancy, alert };
+    }
+
+    /**
+     * Read on-chain conditional-token (ERC-1155) share balance for a specific
+     * token ID. Returns -1 on failure. Used to verify actual fills.
+     */
+    async getSharesBalance(tokenId: string): Promise<number> {
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                const raw = await this.publicClient.readContract({
+                    address: CT_ADDRESS,
+                    abi: CT_ABI,
+                    functionName: 'balanceOf',
+                    args: [this.walletAddress, BigInt(tokenId)],
+                });
+                return Number(raw) / 1e6; // CT shares have 6 decimals
+            } catch {
+                if (attempt < 2) await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+        return -1;
     }
 
     getStartingBalance(): number { return this.startingBalance; }
