@@ -1,7 +1,7 @@
 /**
  * Microstructure Bot v4 — 9-Signal System
  *
- * Base filter: rising + 54-59¢/65-74¢ + two-sided (60-64¢ excluded)
+ * Base filter: 54-59¢/65-74¢ + two-sided + sigs>=2 (60-64¢ excluded, rising dropped)
  *
  * 9 signals (5 original + 4 math-derived):
  *   1. flip60:       leader changed between T-60 and T-30
@@ -42,6 +42,7 @@ import { ChainlinkFeed } from './chainlink-feed.js';
 
 const args = process.argv.slice(2);
 const IS_LIVE = args.includes('--live');
+const TAKER_FIRST = args.includes('--taker-first');
 const STOP_LOSS_CENTS = 5; // exit if leader bid drops this many cents below entry ask
 
 function getArg(name: string, defaultVal: string): string {
@@ -92,7 +93,8 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 async function fetchJSON(url: string): Promise<any> {
     try {
-        const resp = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (polymarket-micro-bot)' } });
+        // Cloudflare blocks Mozilla/5.0-style UAs on the CLOB. curl-like UA gets through.
+        const resp = await fetch(url, { headers: { 'User-Agent': 'curl/8.5.0', 'Accept': '*/*' } });
         if (!resp.ok) return null;
         return resp.json();
     } catch { return null; }
@@ -110,12 +112,25 @@ function getTokenIds(market: any): { upToken: string; downToken: string } | null
 }
 
 async function getBookInfo(tokenId: string) {
-    const raw = await fetchJSON(`${CLOB}/book?token_id=${tokenId}`);
-    if (!raw) return { bestBid: 0, bestAsk: 1, bestAskSize: 0, totalAskDepth: 0, totalBidDepth: 0 };
-    const bids = (raw.bids || []).map((b: any) => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
+    const fetchStartedAt = Date.now();
+    const raw = await fetchJSONRaw(`${CLOB}/book?token_id=${tokenId}`);
+    const fetchCompletedAt = Date.now();
+    if (!raw.ok) {
+        return {
+            bestBid: 0, bestAsk: 1, bestAskSize: 0, totalAskDepth: 0, totalBidDepth: 0,
+            fetchStartedAt, fetchCompletedAt,
+            fetchLatencyMs: fetchCompletedAt - fetchStartedAt,
+            fetchFailed: true,
+            bookTimestamp: null,
+            quoteAgeMs: null,
+        };
+    }
+    const data = raw.data;
+    const bookTimestamp = Number.isFinite(Number(data.timestamp)) ? Number(data.timestamp) : null;
+    const bids = (data.bids || []).map((b: any) => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
         .filter((b: any) => Number.isFinite(b.price) && b.size > 0)
         .sort((a: any, b: any) => b.price - a.price);
-    const asks = (raw.asks || []).map((a: any) => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
+    const asks = (data.asks || []).map((a: any) => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
         .filter((a: any) => Number.isFinite(a.price) && a.size > 0)
         .sort((a: any, b: any) => a.price - b.price);
     return {
@@ -124,7 +139,22 @@ async function getBookInfo(tokenId: string) {
         bestAskSize: asks[0]?.size ?? 0,
         totalAskDepth: asks.reduce((s: number, a: any) => s + a.size, 0),
         totalBidDepth: bids.reduce((s: number, b: any) => s + b.size, 0),
+        fetchStartedAt, fetchCompletedAt,
+        fetchLatencyMs: fetchCompletedAt - fetchStartedAt,
+        fetchFailed: false,
+        bookTimestamp,
+        quoteAgeMs: bookTimestamp !== null ? Math.max(0, fetchCompletedAt - bookTimestamp) : null,
     };
+}
+
+// Like fetchJSON but distinguishes network failure from null body
+async function fetchJSONRaw(url: string): Promise<{ ok: true; data: any } | { ok: false }> {
+    try {
+        const resp = await fetch(url, { headers: { 'User-Agent': 'curl/8.5.0', 'Accept': '*/*' } });
+        if (!resp.ok) return { ok: false };
+        const data = await resp.json();
+        return { ok: true, data };
+    } catch { return { ok: false }; }
 }
 
 // ── Market Discovery ──────────────────────────────────────────────────
@@ -233,18 +263,62 @@ interface BookSnapshot {
     timestamp: number;
 }
 
-async function takeBookSnapshot(market: any): Promise<BookSnapshot | null> {
+async function takeBookSnapshot(market: any, diag?: { slug: string; phase: string; endMs: number }): Promise<BookSnapshot | null> {
     const tokens = getTokenIds(market);
     if (!tokens) return null;
 
+    const snapStartedAt = Date.now();
     const [upBook, downBook] = await Promise.all([
         getBookInfo(tokens.upToken),
         getBookInfo(tokens.downToken),
     ]);
+    const snapCompletedAt = Date.now();
 
     const leader: 'UP' | 'DOWN' | 'TIE' =
         upBook.bestBid > downBook.bestBid ? 'UP' :
         downBook.bestBid > upBook.bestBid ? 'DOWN' : 'TIE';
+
+    // Diagnostic: record what the bot saw at this exact moment, for later
+    // comparison against collector's T-30 snap of the same slug.
+    if (diag) {
+        try {
+            const { appendFileSync } = await import('node:fs');
+            const secondsBeforeEnd = Math.round((diag.endMs - snapCompletedAt) / 1000);
+            const row = {
+                timestamp: new Date(snapCompletedAt).toISOString(),
+                slug: diag.slug,
+                phase: diag.phase,
+                marketEnd: diag.endMs,
+                snapStartedAt, snapCompletedAt,
+                snapLatencyMs: snapCompletedAt - snapStartedAt,
+                secondsBeforeEnd,
+                up: {
+                    bestBid: upBook.bestBid, bestAsk: upBook.bestAsk,
+                    bestAskSize: upBook.bestAskSize,
+                    totalAskDepth: upBook.totalAskDepth, totalBidDepth: upBook.totalBidDepth,
+                    fetchStartedAt: upBook.fetchStartedAt,
+                    fetchCompletedAt: upBook.fetchCompletedAt,
+                    fetchLatencyMs: upBook.fetchLatencyMs,
+                    fetchFailed: upBook.fetchFailed,
+                    bookTimestamp: upBook.bookTimestamp,
+                    quoteAgeMs: upBook.quoteAgeMs,
+                },
+                down: {
+                    bestBid: downBook.bestBid, bestAsk: downBook.bestAsk,
+                    bestAskSize: downBook.bestAskSize,
+                    totalAskDepth: downBook.totalAskDepth, totalBidDepth: downBook.totalBidDepth,
+                    fetchStartedAt: downBook.fetchStartedAt,
+                    fetchCompletedAt: downBook.fetchCompletedAt,
+                    fetchLatencyMs: downBook.fetchLatencyMs,
+                    fetchFailed: downBook.fetchFailed,
+                    bookTimestamp: downBook.bookTimestamp,
+                    quoteAgeMs: downBook.quoteAgeMs,
+                },
+                leader,
+            };
+            appendFileSync('snap-diagnostics.jsonl', JSON.stringify(row) + '\n');
+        } catch { /* diagnostic logging must never break the bot */ }
+    }
 
     return {
         upBid: upBook.bestBid,
@@ -388,8 +462,6 @@ function computeSignals(
         reason = `price ${(leaderAsk * 100).toFixed(0)}¢ outside 54-75¢`;
     } else if (isWeakMiddleZone) {
         reason = `price ${(leaderAsk * 100).toFixed(0)}¢ in excluded 60-64¢ bucket`;
-    } else if (!leaderRising) {
-        reason = `not rising`;
     } else if (signalCount < 2) {
         // sigs=0: -$1.12/tr (45t). sigs=1: +$0.05/tr (234t). sigs>=2: +$0.81/tr (1480t).
         // Validated on full 24-day dataset; smaller than 7-day sim claimed (+$0.15 vs +$0.30).
@@ -401,7 +473,8 @@ function computeSignals(
         reason = `BTC 65-74¢ filtered (-$0.29/tr over 398 trades; structural negative on both sides)`;
     } else {
         action = 'TRADE';
-        const parts: string[] = [prevMatchesFav ? 'prev=fav' : 'prev=dog', 'rising'];
+        const parts: string[] = [prevMatchesFav ? 'prev=fav' : 'prev=dog'];
+        if (leaderRising) parts.push('rising');
         if (flip60) parts.push('flip60');
         if (accounts.includes('odd_flips')) parts.push('odd_flips');
         if (isUSEve) parts.push('US_eve');
@@ -483,8 +556,8 @@ async function main() {
     log(`Mode: ${IS_LIVE ? '🔴 LIVE TRADING 🔴' : 'DRY RUN'}`);
     log(`Trade size: $${TRADE_SIZE_USD} | Max loss: $${MAX_LOSS_USD} | Trail: $${TRAIL_USD} from peak | Max trades: ${MAX_TRADES}`);
     log(`Sweep alert step: $${SWEEP_STEP_USD} above starting balance`);
-    log(`Execution: maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)`);
-    log(`Filters: 54-59¢ + 65-74¢ | rising + sigs>=2 | no BTC 65-74¢ | HOLD all`);
+    log(`Execution: ${TAKER_FIRST ? 'TAKER-FIRST (ask, 10s)' : 'maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)'}`);
+    log(`Filters: 54-59¢ + 65-74¢ | sigs>=2 | no BTC 65-74¢ | HOLD all (rising dropped)`);
     log(`Signals: flip60, odd_flips, US_eve, cross>=2, weekend, sweet_zone, accelerating, depth>=2, late_flip`);
     log('='.repeat(60));
 
@@ -506,7 +579,6 @@ async function main() {
         const publicClobClient = new ClobClient(CLOB, 137, wallet);
         const creds = await publicClobClient.createOrDeriveApiKey();
         client = new ClobClient(CLOB, 137, wallet, creds);
-        executor = new OrderExecutor(client);
         log('CLOB authenticated');
 
         const viemAccount = privateKeyToAccount(formattedKey);
@@ -517,6 +589,9 @@ async function main() {
         if (!initOk) { log('FATAL: Could not read balance. Aborting.'); process.exit(1); }
         log(`Balance: $${verifier.getStartingBalance().toFixed(2)} | Floor: $${verifier.getFloorBalance().toFixed(2)} | Trail: $${TRAIL_USD} from peak`);
         if (verifier.getStartingBalance() < MIN_BALANCE_USD) { log('Balance too low.'); process.exit(1); }
+
+        // Executor gets the verifier so it can on-chain-verify fills (catches phantom fills)
+        executor = new OrderExecutor(client, verifier);
     }
 
     const ledger = new TradeLedger('microstructure-trades.jsonl');
@@ -603,6 +678,9 @@ async function main() {
         stopPnl: number;      // P&L if stopped out
     }
     let pendingTrades: PendingTrade[] = [];
+    // Mutex against double-placing on the same market in the same candle.
+    // Keyed by `${tokenId}:${candleEnd}`. Cleared after each resolution phase.
+    const placedThisCycle = new Set<string>();
 
     // ── Main Loop ──
     while (tradesExecuted < MAX_TRADES && !halted) {
@@ -716,7 +794,11 @@ async function main() {
 
             for (const { market, crypto, interval } of soonestMarkets) {
                 const key = `${crypto.name}-${interval}`;
-                const snapT30 = await takeBookSnapshot(market);
+                const snapT30 = await takeBookSnapshot(market, {
+                    slug: market.slug,
+                    phase: 'T-30-entry',
+                    endMs: new Date(market.endDate).getTime(),
+                });
                 if (!snapT30) continue;
 
                 if (snapT30.leader === 'TIE') {
@@ -749,11 +831,18 @@ async function main() {
                 let execResult;
                 if (IS_LIVE && executor) {
                     const tokenId = signals.leaderTokenId;
+                    const mutexKey = `${tokenId}:${soonestEnd}`;
+                    if (placedThisCycle.has(mutexKey)) {
+                        log(`    SKIP: already placed on ${crypto.name} ${interval}m this candle (mutex hit)`);
+                        continue;
+                    }
+                    placedThisCycle.add(mutexKey);
                     execResult = await executor.executeWithFallback(
                         tokenId, makerPrice, TRADE_SIZE_USD,
                         async () => (await getBookInfo(tokenId)).bestAsk,
                         log,
                         0.75, // max taker price — never pay outside the sweet zone
+                        TAKER_FIRST,
                     );
                     log(`    Order: ${execResult.status} (${execResult.fillType}) | ${execResult.fillSize} shares @${execResult.fillPrice}`);
                     if (execResult.status === 'ERROR') log(`    Error: ${execResult.error}`);
@@ -856,7 +945,7 @@ async function main() {
                                 stoppedOut: false,
                                 holdPnl: 0,
                             },
-                            execution: { status: execResult.status, orderId: execResult.orderId, fillPrice: execResult.fillPrice, fillSize: execResult.fillSize, fillCost: execResult.fillCost, latencyMs: execResult.timestamps.confirmationReceived - execResult.timestamps.orderPlaced },
+                            execution: { status: execResult.status, orderId: execResult.orderId, fillPrice: execResult.fillPrice, fillSize: execResult.fillSize, fillCost: execResult.fillCost, latencyMs: execResult.timestamps.confirmationReceived - execResult.timestamps.orderPlaced, fillType: (execResult as any).fillType },
                             resolution: 'UNKNOWN', won: false, expectedPnl: 0,
                             balanceBefore, balanceAfter: -1, reconciliation: null,
                             sessionPnl: 0, sessionTrades: 0, sessionWins: 0,
@@ -897,6 +986,15 @@ async function main() {
                         ? verifier.reconcile(expectedPnl, balanceBefore, balanceAfter)
                         : null;
 
+                    // Fail loud: a reconciliation alert means the ledger doesn't match
+                    // what actually happened on-chain. Halt so we can investigate
+                    // rather than silently trading on bad data.
+                    if (reconciliation?.alert) {
+                        log(`  🚨 RECONCILIATION ALERT: ${crypto} ${interval}m — expected $${expectedPnl.toFixed(2)} but balance moved $${reconciliation.actualPnl.toFixed(2)} (discrepancy $${reconciliation.discrepancy.toFixed(2)})`);
+                        log(`     HALTING: the executor reported a fill that doesn't match wallet balance change. Investigate before restart.`);
+                        halted = true;
+                    }
+
                     const record: TradeRecord = {
                         timestamp: new Date().toISOString(), tradeNumber: 0,
                         slug, crypto,
@@ -914,7 +1012,7 @@ async function main() {
                             stoppedOut: pending.wouldHaveStopped, // hypothetical — trade held to resolution
                             holdPnl: holdPnl,
                         },
-                        execution: { status: execResult.status, orderId: execResult.orderId, fillPrice: execResult.fillPrice, fillSize: execResult.fillSize, fillCost: execResult.fillCost, latencyMs: execResult.timestamps.confirmationReceived - execResult.timestamps.orderPlaced },
+                        execution: { status: execResult.status, orderId: execResult.orderId, fillPrice: execResult.fillPrice, fillSize: execResult.fillSize, fillCost: execResult.fillCost, latencyMs: execResult.timestamps.confirmationReceived - execResult.timestamps.orderPlaced, fillType: (execResult as any).fillType },
                         resolution, won, expectedPnl,
                         balanceBefore, balanceAfter, reconciliation,
                         sessionPnl: 0, sessionTrades: 0, sessionWins: 0,
@@ -930,6 +1028,7 @@ async function main() {
                 const stats = ledger.getStats();
                 log(`  Session: ${stats.trades}T | ${stats.wins}W/${stats.trades - stats.wins}L | ${(stats.winRate * 100).toFixed(0)}% | PnL: $${stats.pnl.toFixed(2)}`);
                 pendingTrades = [];
+                placedThisCycle.clear();
             }
 
             // Update prev resolutions from all resolved 5m markets this candle
