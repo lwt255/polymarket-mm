@@ -11,6 +11,7 @@
  */
 
 import { ClobClient } from '@polymarket/clob-client';
+import type { PositionVerifier } from './position-verifier.js';
 
 export type FillStatus = 'FILLED' | 'UNFILLED' | 'ERROR';
 export type FillType = 'MAKER' | 'TAKER' | 'UNFILLED';
@@ -42,9 +43,25 @@ const TAKER_TIMEOUT_POLLS = 10; // 10 more seconds for taker attempt
 
 export class OrderExecutor {
     private client: ClobClient;
+    private verifier?: PositionVerifier;
 
-    constructor(client: ClobClient) {
+    constructor(client: ClobClient, verifier?: PositionVerifier) {
         this.client = client;
+        this.verifier = verifier;
+    }
+
+    /**
+     * Verify a fill actually happened on-chain by reading ERC-1155 shares balance.
+     * Returns true if shares increased by at least `minExpected`, false otherwise.
+     * Used to catch phantom fills where the order fell off open orders without filling.
+     */
+    private async verifyFillOnChain(tokenId: string, sharesBefore: number, minExpected: number): Promise<boolean> {
+        if (!this.verifier) return true; // no verifier, can't check — trust open-orders heuristic
+        const sharesAfter = await this.verifier.getSharesBalance(tokenId);
+        if (sharesAfter < 0) return true; // RPC failure — can't verify, don't block
+        const delta = sharesAfter - sharesBefore;
+        // Allow 5% tolerance for partial fills / rounding
+        return delta >= minExpected * 0.95;
     }
 
     /**
@@ -158,6 +175,7 @@ export class OrderExecutor {
     /**
      * Place a maker order (bid+1¢), and if it doesn't fill within 12s,
      * cancel and fall back to a taker order at the current ask.
+     * If `takerFirst` is true, skip Phase 1 entirely and go straight to taker.
      */
     async executeWithFallback(
         tokenId: string,
@@ -166,6 +184,7 @@ export class OrderExecutor {
         getAskPrice: () => Promise<number>,
         log?: (msg: string) => void,
         maxTakerPrice?: number,
+        takerFirst?: boolean,
     ): Promise<FallbackResult> {
         const shares = Math.floor(sizeUsd / makerPrice);
         if (shares < 1) {
@@ -173,6 +192,14 @@ export class OrderExecutor {
         }
 
         const orderPlaced = Date.now();
+
+        // Snapshot on-chain shares before the attempt so we can verify real fills
+        const sharesBefore = this.verifier ? await this.verifier.getSharesBalance(tokenId) : 0;
+
+        // If takerFirst, jump straight to taker phase
+        if (takerFirst) {
+            return await this.executeTakerPhase(tokenId, makerPrice, shares, sizeUsd, getAskPrice, log, maxTakerPrice, orderPlaced, '', sharesBefore);
+        }
 
         // Phase 1: Try maker order
         let orderId: string;
@@ -198,7 +225,22 @@ export class OrderExecutor {
                 const openOrders = await this.client.getOpenOrders() || [];
                 const stillOpen = openOrders.some((o: any) => o.id === orderId || o.orderID === orderId);
                 if (!stillOpen) {
-                    // Maker filled
+                    // Order disappeared — verify on-chain before claiming fill
+                    if (this.verifier) {
+                        await this.sleep(2000); // give chain time to reflect fill
+                        const verified = await this.verifyFillOnChain(tokenId, sharesBefore, shares);
+                        if (!verified) {
+                            log?.(`    PHANTOM FILL: maker order disappeared but shares not received — treating as UNFILLED`);
+                            return {
+                                status: 'UNFILLED', orderId,
+                                fillPrice: 0, fillSize: 0, fillCost: 0,
+                                requestedPrice: makerPrice, requestedShares: shares,
+                                error: 'Phantom fill detected: order vanished without on-chain share delta',
+                                timestamps: { orderPlaced, confirmationReceived: Date.now() },
+                                fillType: 'UNFILLED',
+                            };
+                        }
+                    }
                     log?.(`    Maker filled in ${poll + 1}s`);
                     return {
                         status: 'FILLED', orderId,
@@ -226,16 +268,31 @@ export class OrderExecutor {
         // We cannot distinguish the two from getOpenOrders alone.
         // Proceed to taker fallback — if the maker DID fill, the taker will fail (no balance)
         // which is safer than falsely assuming a fill.
+        // Re-snapshot shares after cancel+sleep so we don't double-count any partial maker fill
+        const sharesBeforeTaker = this.verifier ? await this.verifier.getSharesBalance(tokenId) : 0;
+        return await this.executeTakerPhase(tokenId, makerPrice, shares, sizeUsd, getAskPrice, log, maxTakerPrice, orderPlaced, orderId, sharesBeforeTaker);
+    }
 
-        // Place taker order at current ask
+    private async executeTakerPhase(
+        tokenId: string,
+        makerPrice: number,
+        shares: number,
+        sizeUsd: number,
+        getAskPrice: () => Promise<number>,
+        log: ((msg: string) => void) | undefined,
+        maxTakerPrice: number | undefined,
+        orderPlaced: number,
+        priorOrderId: string,
+        sharesBefore: number,
+    ): Promise<FallbackResult> {
         let takerPrice: number;
         try {
             takerPrice = await getAskPrice();
         } catch {
             return {
-                status: 'UNFILLED', orderId, fillPrice: 0, fillSize: 0, fillCost: 0,
+                status: 'UNFILLED', orderId: priorOrderId, fillPrice: 0, fillSize: 0, fillCost: 0,
                 requestedPrice: makerPrice, requestedShares: shares,
-                error: 'Failed to read ask for taker fallback',
+                error: 'Failed to read ask for taker',
                 timestamps: { orderPlaced, confirmationReceived: Date.now() },
                 fillType: 'UNFILLED',
             };
@@ -244,7 +301,7 @@ export class OrderExecutor {
         if (maxTakerPrice && takerPrice > maxTakerPrice) {
             log?.(`    Taker ask ${(takerPrice * 100).toFixed(0)}¢ > max ${(maxTakerPrice * 100).toFixed(0)}¢ — skipping`);
             return {
-                status: 'UNFILLED', orderId, fillPrice: 0, fillSize: 0, fillCost: 0,
+                status: 'UNFILLED', orderId: priorOrderId, fillPrice: 0, fillSize: 0, fillCost: 0,
                 requestedPrice: takerPrice, requestedShares: 0,
                 error: `Taker price ${takerPrice} exceeds max ${maxTakerPrice}`,
                 timestamps: { orderPlaced, confirmationReceived: Date.now() },
@@ -255,7 +312,7 @@ export class OrderExecutor {
         const takerShares = Math.floor(sizeUsd / takerPrice);
         if (takerShares < 1) {
             return {
-                status: 'UNFILLED', orderId, fillPrice: 0, fillSize: 0, fillCost: 0,
+                status: 'UNFILLED', orderId: priorOrderId, fillPrice: 0, fillSize: 0, fillCost: 0,
                 requestedPrice: takerPrice, requestedShares: 0,
                 error: 'Taker price too high for 1 share',
                 timestamps: { orderPlaced, confirmationReceived: Date.now() },
@@ -281,7 +338,6 @@ export class OrderExecutor {
             return { ...this.errorResult(`Taker order failed: ${err.message}`, takerPrice, takerShares), fillType: 'UNFILLED' };
         }
 
-        // Poll taker for TAKER_TIMEOUT_POLLS seconds
         let takerCancelled = false;
         for (let poll = 0; poll < TAKER_TIMEOUT_POLLS; poll++) {
             await this.sleep(CONFIRM_POLL_INTERVAL_MS);
@@ -289,6 +345,22 @@ export class OrderExecutor {
                 const openOrders = await this.client.getOpenOrders() || [];
                 const stillOpen = openOrders.some((o: any) => o.id === takerOrderId || o.orderID === takerOrderId);
                 if (!stillOpen) {
+                    // Verify on-chain before claiming fill — catch phantoms
+                    if (this.verifier) {
+                        await this.sleep(2000);
+                        const verified = await this.verifyFillOnChain(tokenId, sharesBefore, takerShares);
+                        if (!verified) {
+                            log?.(`    PHANTOM FILL: taker order disappeared but shares not received — treating as UNFILLED`);
+                            return {
+                                status: 'UNFILLED', orderId: takerOrderId,
+                                fillPrice: 0, fillSize: 0, fillCost: 0,
+                                requestedPrice: takerPrice, requestedShares: takerShares,
+                                error: 'Phantom fill detected: taker order vanished without on-chain share delta',
+                                timestamps: { orderPlaced, confirmationReceived: Date.now() },
+                                fillType: 'UNFILLED',
+                            };
+                        }
+                    }
                     log?.(`    Taker filled in ${poll + 1}s`);
                     return {
                         status: 'FILLED', orderId: takerOrderId,
@@ -298,7 +370,6 @@ export class OrderExecutor {
                         fillType: 'TAKER',
                     };
                 }
-                // Cancel taker if running out of time
                 if (poll >= TAKER_TIMEOUT_POLLS - 2 && !takerCancelled) {
                     try {
                         await this.client.cancelOrder({ orderID: takerOrderId } as any);
@@ -314,7 +385,7 @@ export class OrderExecutor {
             status: 'UNFILLED', orderId: takerOrderId,
             fillPrice: 0, fillSize: 0, fillCost: 0,
             requestedPrice: takerPrice, requestedShares: takerShares,
-            error: 'Both maker and taker failed to fill',
+            error: 'Taker failed to fill',
             timestamps: { orderPlaced, confirmationReceived: Date.now() },
             fillType: 'UNFILLED',
         };

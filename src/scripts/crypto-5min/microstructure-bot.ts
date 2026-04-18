@@ -27,6 +27,7 @@
  */
 
 import 'dotenv/config';
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { ClobClient } from '@polymarket/clob-client';
 import { Wallet } from '@ethersproject/wallet';
 import { createPublicClient, createWalletClient, http, parseAbi } from 'viem';
@@ -50,6 +51,17 @@ function getArg(name: string, defaultVal: string): string {
     return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : defaultVal;
 }
 
+const STRATEGY = getArg('--strategy', 'v4');
+const IS_CANDIDATE_STACK = STRATEGY === 'candidate-stack';
+const RUN_MODE = IS_LIVE ? 'live' : 'dry-run';
+const BOT_STEM = IS_CANDIDATE_STACK ? 'candidate-stack-trades' : 'microstructure-trades';
+const DIAG_STEM = IS_CANDIDATE_STACK ? 'candidate-stack-diagnostics' : 'snap-diagnostics';
+const STRATEGY_STEM = IS_CANDIDATE_STACK ? 'candidate-stack' : 'v4';
+const LEDGER_PATH = IS_LIVE ? `${BOT_STEM}.jsonl` : `${BOT_STEM}.dry-run.jsonl`;
+const LEDGER_DB_PATH = IS_LIVE ? `state/${BOT_STEM}.db` : `state/${BOT_STEM}.dry-run.db`;
+const SNAP_DIAGNOSTICS_PATH = IS_LIVE ? `${DIAG_STEM}.live.jsonl` : `${DIAG_STEM}.dry-run.jsonl`;
+const PROCESS_LOCK_PATH = `state/microstructure-bot.${STRATEGY_STEM}.${RUN_MODE}.lock`;
+
 const TRADE_SIZE_USD = parseFloat(getArg('--size', '10'));
 const MAX_LOSS_USD = parseFloat(getArg('--max-loss', '40'));
 const TRAIL_USD = parseFloat(getArg('--trail', '25'));
@@ -58,7 +70,7 @@ const MAX_TRADES = parseInt(getArg('--max-trades', '500'));
 
 // ── Constants ─────────────────────────────────────────────────────────
 
-const ENTRY_SECONDS_BEFORE = 30;
+const ENTRY_SECONDS_BEFORE = IS_CANDIDATE_STACK ? 33 : 30;
 const MIN_BALANCE_USD = 3;
 
 const CRYPTOS = [
@@ -90,6 +102,48 @@ const log = (...a: any[]) => {
 };
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+function acquireProcessLock(): (() => void) | null {
+    mkdirSync('state', { recursive: true });
+    const lockBody = `${process.pid}\n${new Date().toISOString()}\n`;
+
+    try {
+        writeFileSync(PROCESS_LOCK_PATH, lockBody, { flag: 'wx' });
+    } catch (err: any) {
+        if (err?.code !== 'EEXIST') {
+            throw err;
+        }
+
+        try {
+            const [pidLine] = readFileSync(PROCESS_LOCK_PATH, 'utf-8').split('\n');
+            const existingPid = parseInt(pidLine || '', 10);
+            if (Number.isFinite(existingPid)) {
+                try {
+                    process.kill(existingPid, 0);
+                    log(`ERROR: another ${RUN_MODE} bot instance is already running (pid ${existingPid})`);
+                    return null;
+                } catch {
+                    unlinkSync(PROCESS_LOCK_PATH);
+                }
+            } else {
+                unlinkSync(PROCESS_LOCK_PATH);
+            }
+        } catch {
+            try { unlinkSync(PROCESS_LOCK_PATH); } catch { /* ignore */ }
+        }
+
+        writeFileSync(PROCESS_LOCK_PATH, lockBody, { flag: 'wx' });
+    }
+
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        try {
+            unlinkSync(PROCESS_LOCK_PATH);
+        } catch { /* ignore */ }
+    };
+}
 
 async function fetchJSON(url: string): Promise<any> {
     try {
@@ -316,7 +370,7 @@ async function takeBookSnapshot(market: any, diag?: { slug: string; phase: strin
                 },
                 leader,
             };
-            appendFileSync('snap-diagnostics.jsonl', JSON.stringify(row) + '\n');
+            appendFileSync(SNAP_DIAGNOSTICS_PATH, JSON.stringify(row) + '\n');
         } catch { /* diagnostic logging must never break the bot */ }
     }
 
@@ -506,6 +560,115 @@ function computeSignals(
     };
 }
 
+function computeCandidateStackSignals(
+    snapT33: BookSnapshot,
+    snapT60: BookSnapshot | null,
+    snapT120: BookSnapshot | null,
+    snapT240: BookSnapshot | null,
+    prevResolution: 'UP' | 'DOWN' | 'UNKNOWN' | '',
+    prevResolutions: Record<string, 'UP' | 'DOWN' | 'UNKNOWN'>,
+    crypto: string,
+    interval: number,
+): EntrySignals {
+    const leaderSide = snapT33.leader as 'UP' | 'DOWN';
+    const leaderBid = leaderSide === 'UP' ? snapT33.upBid : snapT33.downBid;
+    const leaderAsk = leaderSide === 'UP' ? snapT33.upAsk : snapT33.downAsk;
+    const leaderTokenId = leaderSide === 'UP' ? snapT33.upToken : snapT33.downToken;
+    const leaderAskSize = leaderSide === 'UP' ? snapT33.upAskSize : snapT33.downAskSize;
+    const leaderAskDepth = leaderSide === 'UP' ? snapT33.upAskDepth : snapT33.downAskDepth;
+    const leaderBidDepth = leaderSide === 'UP' ? snapT33.upBidDepth : snapT33.downBidDepth;
+
+    const prevMatchesFav = prevResolution === leaderSide;
+    let leaderRising: boolean | null = null;
+    if (snapT120) {
+        const leaderBidT120 = leaderSide === 'UP' ? snapT120.upBid : snapT120.downBid;
+        if (leaderBidT120 > 0) {
+            leaderRising = leaderBid > leaderBidT120;
+        }
+    }
+
+    const flip60 = snapT60 !== null && snapT60.leader !== 'TIE' && snapT60.leader !== leaderSide;
+    const hourUTC = new Date().getUTCHours();
+    const isUSEve = hourUTC >= 18 || hourUTC < 2;
+    const dow = new Date().getUTCDay();
+    const isWeekend = dow === 0 || dow === 6;
+    let crossSame = 0;
+    for (const [c, res] of Object.entries(prevResolutions)) {
+        if (c !== crypto && res === leaderSide) crossSame++;
+    }
+
+    let accelerating = false;
+    if (snapT60 && snapT120) {
+        const leaderBidT60 = leaderSide === 'UP' ? snapT60.upBid : snapT60.downBid;
+        const leaderBidT120 = leaderSide === 'UP' ? snapT120.upBid : snapT120.downBid;
+        const midMove = leaderBidT60 - leaderBidT120;
+        const finalMove = leaderBid - leaderBidT60;
+        accelerating = (finalMove - midMove) > 0.02;
+    }
+
+    const strongDepth = leaderAskDepth > 0 && (leaderBidDepth / leaderAskDepth) >= 2.0;
+    let lateFlip = false;
+    if (snapT240 && snapT240.leader !== 'TIE') {
+        lateFlip = snapT240.leader !== leaderSide;
+    }
+
+    const accounts: string[] = [];
+    const spread = Math.max(leaderAsk - leaderBid, 0);
+    const in55To65 = leaderAsk >= 0.55 && leaderAsk < 0.65;
+    const underCap = leaderAsk <= 0.75;
+    const spreadTight = spread <= 0.01;
+
+    if (interval === 15 && underCap) {
+        if (lateFlip) accounts.push('15m_late_flip');
+        if (crossSame === 0) accounts.push('15m_cross_0');
+        if (in55To65) accounts.push('15m_price_55_65');
+    }
+    if (interval === 5 && underCap && spreadTight) {
+        accounts.push('5m_spread_tight');
+    }
+
+    const signalCount = accounts.length;
+    let action: 'TRADE' | 'SKIP' = 'SKIP';
+    let reason = '';
+
+    const followerBid = leaderSide === 'UP' ? snapT33.downBid : snapT33.upBid;
+    const isTwoSided = followerBid >= 0.05 && leaderAsk < 0.97 && leaderAsk > 0.03;
+
+    if (!isTwoSided) {
+        reason = 'one-sided';
+    } else if (!underCap) {
+        reason = `ask ${(leaderAsk * 100).toFixed(0)}¢ > 75¢ cap`;
+    } else if (interval === 5 && !spreadTight) {
+        reason = `5m spread ${(spread * 100).toFixed(1)}¢ > 1¢`;
+    } else if (interval === 15 && signalCount === 0) {
+        reason = '15m no family match';
+    } else if (interval === 5 && signalCount === 0) {
+        reason = '5m no family match';
+    } else if (interval !== 5 && interval !== 15) {
+        reason = `interval ${interval} unsupported`;
+    } else {
+        action = 'TRADE';
+        reason = accounts.join('+');
+    }
+
+    if (action === 'TRADE') {
+        const sharesNeeded = Math.floor(TRADE_SIZE_USD / leaderAsk);
+        if (leaderAskDepth < sharesNeeded) {
+            action = 'SKIP';
+            reason = `thin(${leaderAskDepth.toFixed(0)}sh total < ${sharesNeeded}sh needed)`;
+        }
+    }
+
+    return {
+        leaderSide, leaderBid, leaderAsk, leaderTokenId, leaderAskSize, leaderAskDepth,
+        prevMatchesFav, leaderRising,
+        flip60, isUSEve, isWeekend, crossSame,
+        sweetZone: in55To65, accelerating, strongDepth, lateFlip,
+        signalCount, accounts,
+        action, reason,
+    };
+}
+
 // ── Auto-Redeem ───────────────────────────────────────────────────────
 
 async function redeemPosition(conditionId: string, viemWalletClient: any, viemPublicClient: any): Promise<boolean> {
@@ -551,13 +714,27 @@ async function redeemPosition(conditionId: string, viemWalletClient: any, viemPu
 // ── Main ──────────────────────────────────────────────────────────────
 
 async function main() {
+    const releaseLock = acquireProcessLock();
+    if (!releaseLock) {
+        process.exit(1);
+    }
+    const cleanup = () => releaseLock();
+    process.on('exit', cleanup);
+    process.on('SIGINT', () => { cleanup(); process.exit(0); });
+    process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+    process.on('uncaughtException', () => { cleanup(); process.exit(1); });
+    process.on('unhandledRejection', () => { cleanup(); process.exit(1); });
+
     log('='.repeat(60));
-    log(`MICROSTRUCTURE BOT v4 — 9-Signal System`);
+    log(`MICROSTRUCTURE BOT — ${IS_CANDIDATE_STACK ? 'Candidate Stack' : 'v4 9-Signal System'}`);
     log(`Mode: ${IS_LIVE ? '🔴 LIVE TRADING 🔴' : 'DRY RUN'}`);
+    log(`Strategy: ${STRATEGY_STEM} | run mode: ${RUN_MODE} | ledger=${LEDGER_PATH} | diagnostics=${SNAP_DIAGNOSTICS_PATH}`);
     log(`Trade size: $${TRADE_SIZE_USD} | Max loss: $${MAX_LOSS_USD} | Trail: $${TRAIL_USD} from peak | Max trades: ${MAX_TRADES}`);
     log(`Sweep alert step: $${SWEEP_STEP_USD} above starting balance`);
-    log(`Execution: ${TAKER_FIRST ? 'TAKER-FIRST (ask, 10s)' : 'maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)'}`);
-    log(`Filters: 54-59¢ + 65-74¢ | sigs>=2 | no BTC 65-74¢ | HOLD all (rising dropped)`);
+    log(`Execution: ${IS_CANDIDATE_STACK ? 'collector-aligned taker-first (ask, capped)' : TAKER_FIRST ? 'TAKER-FIRST (ask, 10s)' : 'maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)'}`);
+    log(IS_CANDIDATE_STACK
+        ? 'Families: 15m late_flip | 15m cross_0 | 15m price_55_65 | 5m spread_tight | ask cap 75¢'
+        : 'Filters: 54-59¢ + 65-74¢ | sigs>=2 | no BTC 65-74¢ | HOLD all (rising dropped)');
     log(`Signals: flip60, odd_flips, US_eve, cross>=2, weekend, sweet_zone, accelerating, depth>=2, late_flip`);
     log('='.repeat(60));
 
@@ -594,7 +771,7 @@ async function main() {
         executor = new OrderExecutor(client, verifier);
     }
 
-    const ledger = new TradeLedger('microstructure-trades.jsonl');
+    const ledger = new TradeLedger(LEDGER_PATH, LEDGER_DB_PATH);
 
     // Chainlink (used for logging, not entry decision)
     log('Connecting to Chainlink...');
@@ -761,7 +938,7 @@ async function main() {
             continue;
         }
 
-        // ── Phase 2: Entry at ~T-30s ──
+        // ── Phase 2: Entry near the configured decision time ──
         if (secsLeft <= ENTRY_SECONDS_BEFORE + 5 && secsLeft > 5 && !evaluatedEndTimes.has(soonestEnd)) {
             evaluatedEndTimes.add(soonestEnd);
             log(`\n--- T-${secsLeft}s ENTRY WINDOW ---`);
@@ -792,13 +969,20 @@ async function main() {
                 batchBalanceBefore = check.balance;
             }
 
-            for (const { market, crypto, interval } of soonestMarkets) {
+            // Take T-30 snapshots for ALL markets in parallel so every market
+            // gets evaluated at the same T moment. Previously this was serial,
+            // meaning the 4th or 5th market in the loop was evaluated at T-20
+            // instead of T-33 — 10+ seconds of price drift missed by the sim.
+                const parallelSnaps = await Promise.all(soonestMarkets.map(({ market, crypto, interval }) =>
+                    takeBookSnapshot(market, {
+                        slug: market.slug,
+                        phase: IS_CANDIDATE_STACK ? 'T-33-entry' : 'T-30-entry',
+                        endMs: new Date(market.endDate).getTime(),
+                    }).then(snap => ({ market, crypto, interval, snap }))
+            ));
+
+            for (const { market, crypto, interval, snap: snapT30 } of parallelSnaps) {
                 const key = `${crypto.name}-${interval}`;
-                const snapT30 = await takeBookSnapshot(market, {
-                    slug: market.slug,
-                    phase: 'T-30-entry',
-                    endMs: new Date(market.endDate).getTime(),
-                });
                 if (!snapT30) continue;
 
                 if (snapT30.leader === 'TIE') {
@@ -814,7 +998,9 @@ async function main() {
                 // Use prev resolution for this crypto (5m resolution drives the signal)
                 const prevRes = prevResolutions[crypto.name] || 'UNKNOWN';
 
-                const signals = computeSignals(snapT30, snapT60, snapT120, snapT240, prevRes, prevResolutions, crypto.name, interval);
+                const signals = IS_CANDIDATE_STACK
+                    ? computeCandidateStackSignals(snapT30, snapT60, snapT120, snapT240, prevRes, prevResolutions, crypto.name, interval)
+                    : computeSignals(snapT30, snapT60, snapT120, snapT240, prevRes, prevResolutions, crypto.name, interval);
 
                 // Log signal details
                 const sideStr = `${signals.leaderSide} leads @${(signals.leaderAsk * 100).toFixed(0)}¢`;
@@ -824,9 +1010,15 @@ async function main() {
 
                 if (signals.action !== 'TRADE') continue;
 
-                // Execute — use maker order (bid+1¢) for better entry price
-                const makerPrice = Math.min(signals.leaderBid + 0.01, signals.leaderAsk); // bid+1¢, capped at ask
-                log(`  >> BUY ${signals.leaderSide}: ${crypto.name} ${interval}m | ask=${(signals.leaderAsk * 100).toFixed(0)}¢ maker=${(makerPrice * 100).toFixed(0)}¢`);
+                const targetEntryPrice = IS_CANDIDATE_STACK
+                    ? signals.leaderAsk
+                    : Math.min(signals.leaderBid + 0.01, signals.leaderAsk);
+                const maxTakerPrice = IS_CANDIDATE_STACK ? 0.75 : 0.75;
+                log(
+                    IS_CANDIDATE_STACK
+                        ? `  >> BUY ${signals.leaderSide}: ${crypto.name} ${interval}m | ask=${(signals.leaderAsk * 100).toFixed(0)}¢ taker-first [${signals.reason}]`
+                        : `  >> BUY ${signals.leaderSide}: ${crypto.name} ${interval}m | ask=${(signals.leaderAsk * 100).toFixed(0)}¢ maker=${(targetEntryPrice * 100).toFixed(0)}¢`,
+                );
 
                 let execResult;
                 if (IS_LIVE && executor) {
@@ -838,24 +1030,25 @@ async function main() {
                     }
                     placedThisCycle.add(mutexKey);
                     execResult = await executor.executeWithFallback(
-                        tokenId, makerPrice, TRADE_SIZE_USD,
+                        tokenId, targetEntryPrice, TRADE_SIZE_USD,
                         async () => (await getBookInfo(tokenId)).bestAsk,
                         log,
-                        0.75, // max taker price — never pay outside the sweet zone
-                        TAKER_FIRST,
+                        maxTakerPrice,
+                        IS_CANDIDATE_STACK ? true : TAKER_FIRST,
                     );
                     log(`    Order: ${execResult.status} (${execResult.fillType}) | ${execResult.fillSize} shares @${execResult.fillPrice}`);
                     if (execResult.status === 'ERROR') log(`    Error: ${execResult.error}`);
                 } else {
-                    const shares = Math.floor(TRADE_SIZE_USD / makerPrice);
-                    log(`    DRY RUN: would buy ${shares} shares of ${signals.leaderSide} @${(makerPrice * 100).toFixed(0)}¢ ($${(shares * makerPrice).toFixed(2)}) [saved ${((signals.leaderAsk - makerPrice) * 100).toFixed(0)}¢/sh vs ask]`);
+                    const shares = Math.floor(TRADE_SIZE_USD / targetEntryPrice);
+                    const executionLabel = IS_CANDIDATE_STACK ? 'collector-aligned ask' : 'maker preview';
+                    log(`    DRY RUN: would buy ${shares} shares of ${signals.leaderSide} @${(targetEntryPrice * 100).toFixed(0)}¢ ($${(shares * targetEntryPrice).toFixed(2)}) [${executionLabel}]`);
                     execResult = {
                         status: 'FILLED' as const,
                         orderId: 'dry-run',
-                        fillPrice: makerPrice,
+                        fillPrice: targetEntryPrice,
                         fillSize: shares,
-                        fillCost: shares * makerPrice,
-                        requestedPrice: makerPrice,
+                        fillCost: shares * targetEntryPrice,
+                        requestedPrice: targetEntryPrice,
                         requestedShares: shares,
                         timestamps: { orderPlaced: Date.now(), confirmationReceived: Date.now() },
                     };
@@ -949,6 +1142,7 @@ async function main() {
                             resolution: 'UNKNOWN', won: false, expectedPnl: 0,
                             balanceBefore, balanceAfter: -1, reconciliation: null,
                             sessionPnl: 0, sessionTrades: 0, sessionWins: 0,
+                            botVersion: IS_CANDIDATE_STACK ? 'candidate-stack-v1' : 'v4',
                         };
                         ledger.recordTrade(record);
                         continue;
@@ -1016,6 +1210,7 @@ async function main() {
                         resolution, won, expectedPnl,
                         balanceBefore, balanceAfter, reconciliation,
                         sessionPnl: 0, sessionTrades: 0, sessionWins: 0,
+                        botVersion: IS_CANDIDATE_STACK ? 'candidate-stack-v1' : 'v4',
                     };
                     ledger.recordTrade(record);
                 }

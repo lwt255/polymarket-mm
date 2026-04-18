@@ -56,6 +56,7 @@ export interface TradeRecord {
         fillSize: number;
         fillCost: number;
         latencyMs: number;
+        fillType?: 'MAKER' | 'TAKER' | 'UNFILLED';
     };
 
     // Resolution
