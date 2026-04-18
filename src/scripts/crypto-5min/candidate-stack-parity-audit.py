@@ -115,15 +115,46 @@ def main():
     if not os.path.exists(args.diag):
         raise SystemExit(f"Diagnostics file not found: {args.diag}")
 
-    collector_rows = open_jsonl(args.collector)
-    collector_by_slug = {}
-    first = collector_rows[0]["collectedAt"] if collector_rows else None
-    last = collector_rows[-1]["collectedAt"] if collector_rows else None
-    for row in collector_rows:
-        collector_by_slug[row.get("slug")] = row
-
     ledger_rows = open_jsonl(args.ledger)
     diag_rows = open_jsonl(args.diag)
+
+    # Build the slug set we actually care about so we can stream the
+    # collector file and only retain rows for those slugs. The VPS
+    # pricing-data.jsonl is ~4GB and the VPS has ~2GB RAM, so loading
+    # everything is an OOM guarantee.
+    wanted_slugs = set()
+    for row in ledger_rows:
+        s = row.get("slug")
+        if s: wanted_slugs.add(s)
+    for row in diag_rows:
+        s = row.get("slug")
+        if s: wanted_slugs.add(s)
+
+    collector_by_slug = {}
+    collector_count = 0
+    first = None
+    last = None
+    with open(args.collector, "r") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            collector_count += 1
+            # Cheap substring prefilter: skip JSON parse unless one of the
+            # wanted slugs appears in the line. Keeps RSS low on 4GB files.
+            if not any(f'"slug":"{s}"' in line for s in wanted_slugs):
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            ts = row.get("collectedAt")
+            if ts:
+                if first is None:
+                    first = ts
+                last = ts
+            slug = row.get("slug")
+            if slug in wanted_slugs:
+                collector_by_slug[slug] = row
 
     diag_by_slug = defaultdict(list)
     for row in diag_rows:
@@ -186,13 +217,15 @@ def main():
 
     print(json.dumps({
         "collector_path": args.collector,
-        "collector_count": len(collector_rows),
+        "collector_lines_scanned": collector_count,
+        "collector_rows_matched": len(collector_by_slug),
         "collector_first": first,
         "collector_last": last,
         "ledger_path": args.ledger,
         "ledger_count": len(ledger_rows),
         "diag_path": args.diag,
         "diag_count": len(diag_rows),
+        "wanted_slugs": len(wanted_slugs),
     }, indent=2))
 
     print("\n=== Decision Snapshot Parity ===")
