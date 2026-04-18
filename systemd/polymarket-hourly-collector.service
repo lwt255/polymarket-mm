@@ -1,0 +1,18 @@
+[Unit]
+Description=Polymarket Hourly-Candle Collector
+After=network.target
+
+[Service]
+Type=simple
+User=polybot
+WorkingDirectory=/home/polybot/polymarket-mm
+ExecStart=/usr/bin/npx tsx src/scripts/hourly-candle-collector.ts
+Restart=on-failure
+RestartSec=30
+Environment=NODE_ENV=production
+
+StandardOutput=append:/home/polybot/polymarket-mm/logs/hourly-collector.log
+StandardError=append:/home/polybot/polymarket-mm/logs/hourly-collector.log
+
+[Install]
+WantedBy=multi-user.target

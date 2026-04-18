@@ -55,10 +55,16 @@ const MARKET_CONFIGS = [
     { crypto: 'eth', clSymbol: 'eth/usd', interval: 5 },
     { crypto: 'sol', clSymbol: 'sol/usd', interval: 5 },
     { crypto: 'xrp', clSymbol: 'xrp/usd', interval: 5 },
+    { crypto: 'bnb', clSymbol: 'bnb/usd', interval: 5 },
+    { crypto: 'doge', clSymbol: 'doge/usd', interval: 5 },
+    { crypto: 'hype', clSymbol: 'hype/usd', interval: 5 },
     { crypto: 'btc', clSymbol: 'btc/usd', interval: 15 },
     { crypto: 'eth', clSymbol: 'eth/usd', interval: 15 },
     { crypto: 'sol', clSymbol: 'sol/usd', interval: 15 },
     { crypto: 'xrp', clSymbol: 'xrp/usd', interval: 15 },
+    { crypto: 'bnb', clSymbol: 'bnb/usd', interval: 15 },
+    { crypto: 'doge', clSymbol: 'doge/usd', interval: 15 },
+    { crypto: 'hype', clSymbol: 'hype/usd', interval: 15 },
 ] as const;
 
 const log = (...args: any[]) => {
@@ -278,7 +284,7 @@ interface MissedSnapshot {
 async function fetchJSON(url: string): Promise<any> {
     try {
         const resp = await fetch(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (polymarket-collector)' },
+            headers: { 'User-Agent': 'curl/8.5.0', 'Accept': '*/*' },
         });
         if (!resp.ok) return null;
         return resp.json();
@@ -359,7 +365,7 @@ async function getFullBookInfo(tokenId: string): Promise<FullBookInfo> {
     const fetchStartedAt = Date.now();
     try {
         const resp = await fetch(`${CLOB}/book?token_id=${tokenId}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (polymarket-collector)' },
+            headers: { 'User-Agent': 'curl/8.5.0', 'Accept': '*/*' },
         });
         const fetchCompletedAt = Date.now();
         if (!resp.ok) {

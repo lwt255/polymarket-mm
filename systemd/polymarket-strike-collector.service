@@ -1,0 +1,18 @@
+[Unit]
+Description=Polymarket Strike-Binary Collector
+After=network.target
+
+[Service]
+Type=simple
+User=polybot
+WorkingDirectory=/home/polybot/polymarket-mm
+ExecStart=/usr/bin/npx tsx src/scripts/strike-binary-collector.ts
+Restart=on-failure
+RestartSec=30
+Environment=NODE_ENV=production
+
+StandardOutput=append:/home/polybot/polymarket-mm/logs/strike-collector.log
+StandardError=append:/home/polybot/polymarket-mm/logs/strike-collector.log
+
+[Install]
+WantedBy=multi-user.target
