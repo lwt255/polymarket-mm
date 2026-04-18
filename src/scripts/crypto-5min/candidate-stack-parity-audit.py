@@ -251,6 +251,89 @@ def main():
             f"p90={fmt_cents(percentile(fill_diffs, 0.90))}"
         )
 
+    # ── Friction budget ──
+    # Decompose live-vs-collector gap into its components so we know what's
+    # actually eating the edge vs what the collector already knew about.
+    #
+    # Definitions:
+    #   slippage  = (bot fillPrice - collector T-30 ask) × shares
+    #               Negative = bot paid less than collector model, positive = paid more
+    #   fees_gas  = expectedPnl (collector math) - actual wallet balance delta
+    #               Fees on both sides: taker fee on entry, gas on redeem
+    #   phantom   = for UNFILLED rows with non-trivial balance delta OR rows
+    #               flagged execution.recoveredFromPhantom=true
+    # Everything is signed so summing gives the total cost vs the collector's
+    # zero-friction projection.
+    print("\n=== Friction Budget ===")
+    total_slippage = 0.0
+    total_fees = 0.0
+    phantom_count = 0
+    phantom_loss = 0.0
+    recovered_count = 0
+    filled_count = 0
+    total_expected = 0.0
+    total_actual = 0.0
+
+    for row in ledger_rows:
+        execution = row.get("execution", {}) or {}
+        status = execution.get("status")
+        bb = row.get("balanceBefore")
+        ba = row.get("balanceAfter")
+        expected = row.get("expectedPnl", 0) or 0
+        delta = (ba - bb) if isinstance(bb, (int, float)) and isinstance(ba, (int, float)) and bb > 0 and ba > 0 else None
+
+        if execution.get("recoveredFromPhantom"):
+            recovered_count += 1
+
+        if status == "FILLED":
+            filled_count += 1
+            total_expected += expected
+            if delta is not None:
+                total_actual += delta
+                # fees_gas = expected - actual; positive means live kept less than collector math
+                total_fees += (expected - delta)
+            # slippage vs collector T-30 ask
+            slug = row.get("slug")
+            collector = collector_by_slug.get(slug)
+            if collector:
+                snap = closest_snapshot(collector.get("snapshots") or [], 30)
+                if snap is not None:
+                    side = row.get("underdogSide")
+                    if side in ("UP", "DOWN"):
+                        _, col_ask = side_values(snap, side)
+                        bot_fill = execution.get("fillPrice", 0) or 0
+                        shares = execution.get("fillSize", 0) or 0
+                        total_slippage += (bot_fill - col_ask) * shares
+        elif status == "UNFILLED":
+            if delta is not None and abs(delta) > 0.50:
+                # Declared unfilled but wallet moved — real hidden impact.
+                phantom_count += 1
+                phantom_loss += delta
+                if delta < 0:
+                    total_actual += delta  # loss still counts against real PnL
+
+    print(f"Filled trades:       {filled_count}")
+    print(f"Recovered phantoms:  {recovered_count}   (false-positive UNFILLED auto-corrected)")
+    print(f"Hidden phantoms:     {phantom_count}   (UNFILLED with balance anomaly)")
+    print(f"Collector expected:  {fmt_dollars(total_expected)}   (sum of ledger expectedPnl for FILLED)")
+    print(f"Wallet actual:       {fmt_dollars(total_actual)}   (sum of real balance deltas)")
+    print(f"Live-vs-collector:   {fmt_dollars(total_actual - total_expected)}")
+    print()
+    print(f"  Breakdown of the gap:")
+    print(f"    Fill slippage:   {fmt_dollars(-total_slippage)}   (bot fill vs collector T-30 ask × shares; neg = paid more)")
+    print(f"    Fees + gas:      {fmt_dollars(-total_fees)}       (collector math - wallet on FILLED)")
+    print(f"    Phantom loss:    {fmt_dollars(phantom_loss)}      (UNFILLED with balance move, not captured in expected)")
+    if filled_count:
+        per_trade = (total_actual - total_expected) / filled_count
+        print(f"  Per-trade friction: {fmt_dollars(per_trade)}   over {filled_count} filled trades")
+
+
+def fmt_dollars(x):
+    if abs(x) < 0.005:
+        x = 0.0  # collapse signed-zero and sub-cent noise to a clean 0
+    sign = "+" if x > 0 else ("" if x < 0 else "")
+    return f"{sign}${x:.2f}"
+
 
 if __name__ == "__main__":
     main()

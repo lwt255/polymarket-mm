@@ -1120,7 +1120,10 @@ async function main() {
                 }
 
                 for (const pending of pendingTrades) {
-                    const { signals, crypto, interval, slug, conditionId, execResult, balanceBefore } = pending;
+                    const { signals, crypto, interval, slug, conditionId, balanceBefore } = pending;
+                    // execResult is mutable in this scope so orphan recovery can
+                    // reclassify UNFILLED -> FILLED when shares are found on-chain.
+                    let execResult = pending.execResult;
                     const resolution = await resolveOnChain(slug, viemPublicClient, 20);
 
                     if (resolution === 'UNKNOWN') {
@@ -1150,6 +1153,34 @@ async function main() {
                         };
                         ledger.recordTrade(record);
                         continue;
+                    }
+
+                    // Orphan recovery: if executor declared UNFILLED but shares
+                    // exist on-chain for the leader's token, reclassify as FILLED
+                    // so resolution, redeem, and reconciliation compute against
+                    // reality. Without this the trade would be recorded as a $0
+                    // "loss" while the wallet silently lost the entry cost.
+                    // The halt-on-reconciliation safety remains; recovery is
+                    // preferred when we can confidently infer the real outcome.
+                    let recoveredFromPhantom = false;
+                    if (IS_LIVE && verifier && execResult.status === 'UNFILLED' && signals.leaderTokenId) {
+                        const actualShares = await verifier.getSharesBalance(signals.leaderTokenId);
+                        // Guard against dust: require at least half the intended
+                        // trade notional to avoid false recovery on stale positions.
+                        const minMeaningfulShares = (TRADE_SIZE_USD * 0.5) / Math.max(signals.leaderAsk, 0.01);
+                        if (actualShares >= minMeaningfulShares) {
+                            const inferredCost = actualShares * signals.leaderAsk;
+                            log(`  ⚠️ RECOVERED PHANTOM: ${crypto} ${interval}m declared UNFILLED but ${actualShares} shares on-chain — reclassifying as FILLED @${(signals.leaderAsk * 100).toFixed(0)}¢ ($${inferredCost.toFixed(2)})`);
+                            execResult = {
+                                ...execResult,
+                                status: 'FILLED',
+                                fillPrice: signals.leaderAsk,
+                                fillSize: actualShares,
+                                fillCost: inferredCost,
+                                fillType: 'TAKER',
+                            };
+                            recoveredFromPhantom = true;
+                        }
                     }
 
                     const won = signals.leaderSide === resolution;
@@ -1193,7 +1224,9 @@ async function main() {
                     // rather than silently trading on bad data.
                     if (reconciliation?.alert) {
                         log(`  🚨 RECONCILIATION ALERT: ${crypto} ${interval}m — expected $${expectedPnl.toFixed(2)} but balance moved $${reconciliation.actualPnl.toFixed(2)} (discrepancy $${reconciliation.discrepancy.toFixed(2)})`);
-                        if (execResult.status === 'FILLED') {
+                        if (recoveredFromPhantom) {
+                            log(`     HALTING: recovered from phantom but balance still disagrees with inferred fill. Size/price inference was likely wrong. Investigate manually.`);
+                        } else if (execResult.status === 'FILLED') {
                             log(`     HALTING: the executor reported a fill that doesn't match wallet balance change. Investigate before restart.`);
                         } else {
                             log(`     HALTING: executor declared UNFILLED (${execResult.status}) but balance moved — likely false-positive phantom detection. The on-chain position exists; shares may need manual redemption.`);
@@ -1218,7 +1251,7 @@ async function main() {
                             stoppedOut: pending.wouldHaveStopped, // hypothetical — trade held to resolution
                             holdPnl: holdPnl,
                         },
-                        execution: { status: execResult.status, orderId: execResult.orderId, fillPrice: execResult.fillPrice, fillSize: execResult.fillSize, fillCost: execResult.fillCost, latencyMs: execResult.timestamps.confirmationReceived - execResult.timestamps.orderPlaced, fillType: (execResult as any).fillType },
+                        execution: { status: execResult.status, orderId: execResult.orderId, fillPrice: execResult.fillPrice, fillSize: execResult.fillSize, fillCost: execResult.fillCost, latencyMs: execResult.timestamps.confirmationReceived - execResult.timestamps.orderPlaced, fillType: (execResult as any).fillType, recoveredFromPhantom: recoveredFromPhantom || undefined },
                         resolution, won, expectedPnl,
                         balanceBefore, balanceAfter, reconciliation,
                         sessionPnl: 0, sessionTrades: 0, sessionWins: 0,

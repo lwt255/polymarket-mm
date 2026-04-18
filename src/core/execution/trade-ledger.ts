@@ -57,6 +57,11 @@ export interface TradeRecord {
         fillCost: number;
         latencyMs: number;
         fillType?: 'MAKER' | 'TAKER' | 'UNFILLED';
+        // Set when the executor declared UNFILLED but on-chain shares were
+        // found at resolution time (false-positive phantom detection). The
+        // trade is reclassified as FILLED using inferred size/price so the
+        // ledger reflects reality; this flag marks it as audit-worthy.
+        recoveredFromPhantom?: boolean;
     };
 
     // Resolution
