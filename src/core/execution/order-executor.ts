@@ -54,14 +54,30 @@ export class OrderExecutor {
      * Verify a fill actually happened on-chain by reading ERC-1155 shares balance.
      * Returns true if shares increased by at least `minExpected`, false otherwise.
      * Used to catch phantom fills where the order fell off open orders without filling.
+     *
+     * Retries over ~12s because a single RPC read immediately after fill can
+     * miss the balance update (block propagation + RPC staleness). A false
+     * "UNFILLED" return leads to orphan positions that silently drain balance —
+     * we only want to return false when we're confident no shares arrived.
      */
     private async verifyFillOnChain(tokenId: string, sharesBefore: number, minExpected: number): Promise<boolean> {
         if (!this.verifier) return true; // no verifier, can't check — trust open-orders heuristic
-        const sharesAfter = await this.verifier.getSharesBalance(tokenId);
-        if (sharesAfter < 0) return true; // RPC failure — can't verify, don't block
-        const delta = sharesAfter - sharesBefore;
-        // Allow 5% tolerance for partial fills / rounding
-        return delta >= minExpected * 0.95;
+        for (let attempt = 0; attempt < 4; attempt++) {
+            const sharesAfter = await this.verifier.getSharesBalance(tokenId);
+            if (sharesAfter < 0) {
+                // RPC failure on this attempt — retry
+                await this.sleep(3000);
+                continue;
+            }
+            const delta = sharesAfter - sharesBefore;
+            if (delta >= minExpected * 0.95) return true;
+            // Shares not yet present — wait for next block and retry
+            await this.sleep(3000);
+        }
+        // Final attempt to distinguish RPC flake from genuine phantom
+        const finalShares = await this.verifier.getSharesBalance(tokenId);
+        if (finalShares < 0) return true; // treat terminal RPC failure as "trust open-orders"
+        return (finalShares - sharesBefore) >= minExpected * 0.95;
     }
 
     /**

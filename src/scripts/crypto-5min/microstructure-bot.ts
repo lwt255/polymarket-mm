@@ -1108,11 +1108,15 @@ async function main() {
 
             if (pendingTrades.length > 0) {
                 log(`  Resolving ${pendingTrades.length} pending trade(s)...`);
-                const filledTradesThisBatch = pendingTrades.filter(p => p.execResult.status === 'FILLED');
-                const canReconcileIndividually = IS_LIVE && verifier && filledTradesThisBatch.length === 1;
+                // Reconcile whenever there is exactly one pending trade this candle,
+                // regardless of declared fill status. A false-positive phantom-fill
+                // call (status=UNFILLED despite real shares on chain) would otherwise
+                // bypass reconciliation and silently hide losses. The balance delta
+                // is the only ground truth we can trust.
+                const canReconcileIndividually = IS_LIVE && verifier && pendingTrades.length === 1;
 
-                if (IS_LIVE && filledTradesThisBatch.length > 1) {
-                    log(`  Note: ${filledTradesThisBatch.length} fills in one candle — skipping per-trade balance reconciliation because positions overlap`);
+                if (IS_LIVE && pendingTrades.length > 1) {
+                    log(`  Note: ${pendingTrades.length} trades in one candle — skipping per-trade balance reconciliation because positions overlap`);
                 }
 
                 for (const pending of pendingTrades) {
@@ -1176,7 +1180,11 @@ async function main() {
                         balanceAfter = postCheck.success ? postCheck.balance : -1;
                     }
 
-                    const reconciliation = (canReconcileIndividually && execResult.status === 'FILLED' && balanceBefore > 0 && balanceAfter > 0 && verifier)
+                    // expectedPnl is 0 for UNFILLED (holdPnl math uses fillSize/fillCost,
+                    // both 0 when unfilled), so reconcile(0, before, after) correctly
+                    // alarms on any material balance delta — catching false-positive
+                    // phantoms where shares actually were received.
+                    const reconciliation = (canReconcileIndividually && balanceBefore > 0 && balanceAfter > 0 && verifier)
                         ? verifier.reconcile(expectedPnl, balanceBefore, balanceAfter)
                         : null;
 
@@ -1185,7 +1193,11 @@ async function main() {
                     // rather than silently trading on bad data.
                     if (reconciliation?.alert) {
                         log(`  🚨 RECONCILIATION ALERT: ${crypto} ${interval}m — expected $${expectedPnl.toFixed(2)} but balance moved $${reconciliation.actualPnl.toFixed(2)} (discrepancy $${reconciliation.discrepancy.toFixed(2)})`);
-                        log(`     HALTING: the executor reported a fill that doesn't match wallet balance change. Investigate before restart.`);
+                        if (execResult.status === 'FILLED') {
+                            log(`     HALTING: the executor reported a fill that doesn't match wallet balance change. Investigate before restart.`);
+                        } else {
+                            log(`     HALTING: executor declared UNFILLED (${execResult.status}) but balance moved — likely false-positive phantom detection. The on-chain position exists; shares may need manual redemption.`);
+                        }
                         halted = true;
                     }
 
