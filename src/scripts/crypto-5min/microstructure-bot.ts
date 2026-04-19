@@ -27,7 +27,7 @@
  */
 
 import 'dotenv/config';
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { ClobClient } from '@polymarket/clob-client';
 import { Wallet } from '@ethersproject/wallet';
 import { createPublicClient, createWalletClient, http, parseAbi } from 'viem';
@@ -60,6 +60,9 @@ const STRATEGY_STEM = IS_CANDIDATE_STACK ? 'candidate-stack' : 'v4';
 const LEDGER_PATH = IS_LIVE ? `${BOT_STEM}.jsonl` : `${BOT_STEM}.dry-run.jsonl`;
 const LEDGER_DB_PATH = IS_LIVE ? `state/${BOT_STEM}.db` : `state/${BOT_STEM}.dry-run.db`;
 const SNAP_DIAGNOSTICS_PATH = IS_LIVE ? `${DIAG_STEM}.live.jsonl` : `${DIAG_STEM}.dry-run.jsonl`;
+const ABORT_LOG_PATH = IS_LIVE
+    ? `candidate-stack-aborts.live.jsonl`
+    : `candidate-stack-aborts.dry-run.jsonl`;
 const PROCESS_LOCK_PATH = `state/microstructure-bot.${STRATEGY_STEM}.${RUN_MODE}.lock`;
 
 const TRADE_SIZE_USD = parseFloat(getArg('--size', '10'));
@@ -72,6 +75,12 @@ const MAX_TRADES = parseInt(getArg('--max-trades', '500'));
 
 const ENTRY_SECONDS_BEFORE = IS_CANDIDATE_STACK ? 33 : 30;
 const MIN_BALANCE_USD = 3;
+// Pre-fill leader re-verification: wait this long after decision then re-read the
+// book before firing the taker order. Historical (pricing-data.jsonl) analysis
+// shows 10.6% of markets in our filter universe flip leader between T-33 and
+// T-30, and those flip trades go from 66% WR → 39% WR. Abort rather than fire
+// into a flipped market.
+const PRE_FILL_VERIFY_DELAY_MS = 1500;
 
 const CRYPTOS = [
     { slug: 'btc', clSymbol: 'btc/usd' as const, name: 'BTC' },
@@ -336,7 +345,6 @@ async function takeBookSnapshot(market: any, diag?: { slug: string; phase: strin
     // comparison against collector's T-30 snap of the same slug.
     if (diag) {
         try {
-            const { appendFileSync } = await import('node:fs');
             const secondsBeforeEnd = Math.round((diag.endMs - snapCompletedAt) / 1000);
             const row = {
                 timestamp: new Date(snapCompletedAt).toISOString(),
@@ -1028,6 +1036,45 @@ async function main() {
                         log(`    SKIP: already placed on ${crypto.name} ${interval}m this candle (mutex hit)`);
                         continue;
                     }
+
+                    // Pre-fill verification: wait, then re-read the book to confirm the
+                    // leader side and ask haven't flipped. Without this, ~11% of trades in
+                    // our filter universe fire into a flipped market and bleed −27pp WR.
+                    if (IS_CANDIDATE_STACK) {
+                        await new Promise(r => setTimeout(r, PRE_FILL_VERIFY_DELAY_MS));
+                        const [upBookNow, downBookNow] = await Promise.all([
+                            getBookInfo(snapT30.upToken),
+                            getBookInfo(snapT30.downToken),
+                        ]);
+                        const newLeaderSide: 'UP' | 'DOWN' | 'TIE' =
+                            upBookNow.bestBid > downBookNow.bestBid ? 'UP' :
+                            downBookNow.bestBid > upBookNow.bestBid ? 'DOWN' : 'TIE';
+                        const newLeaderAsk = signals.leaderSide === 'UP' ? upBookNow.bestAsk : downBookNow.bestAsk;
+                        const flipped = newLeaderSide !== signals.leaderSide;
+                        const aboveCap = newLeaderAsk > maxTakerPrice;
+                        if (flipped || aboveCap) {
+                            const reason = flipped
+                                ? `leader flipped ${signals.leaderSide}→${newLeaderSide} (upBid=${upBookNow.bestBid.toFixed(2)} downBid=${downBookNow.bestBid.toFixed(2)})`
+                                : `ask moved above ${(maxTakerPrice * 100).toFixed(0)}¢ cap (${(newLeaderAsk * 100).toFixed(0)}¢)`;
+                            log(`    ABORT (pre-fill verify): ${reason}`);
+                            try {
+                                appendFileSync(ABORT_LOG_PATH, JSON.stringify({
+                                    timestamp: new Date().toISOString(),
+                                    slug: market.slug, crypto: crypto.name, interval,
+                                    decisionSide: signals.leaderSide,
+                                    decisionAsk: signals.leaderAsk,
+                                    reverifySide: newLeaderSide,
+                                    reverifyUpBid: upBookNow.bestBid,
+                                    reverifyDownBid: downBookNow.bestBid,
+                                    reverifyLeaderAsk: newLeaderAsk,
+                                    reason,
+                                }) + '\n');
+                            } catch {}
+                            continue;
+                        }
+                        log(`    Pre-fill OK: ${signals.leaderSide} still leading (upBid=${upBookNow.bestBid.toFixed(2)} downBid=${downBookNow.bestBid.toFixed(2)}) ask=${(newLeaderAsk * 100).toFixed(0)}¢`);
+                    }
+
                     placedThisCycle.add(mutexKey);
                     execResult = await executor.executeWithFallback(
                         tokenId, targetEntryPrice, TRADE_SIZE_USD,
