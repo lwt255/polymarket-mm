@@ -628,7 +628,10 @@ function computeCandidateStackSignals(
 
     if (interval === 15 && underCap) {
         if (lateFlip) accounts.push('15m_late_flip');
-        if (crossSame === 0) accounts.push('15m_cross_0');
+        // 15m_cross_0 removed 2026-04-19: temporal-split analysis showed this family
+        // lost $311 over 30d on 234 trades, losing in BOTH halves of the data
+        // (Mar 20-Apr 5: -$0.40/tr, Apr 5-Apr 19: -$2.14/tr). Exclusive-family
+        // analysis confirms 100 clean cross_0-only trades lose $1.60/tr.
         if (in55To65) accounts.push('15m_price_55_65');
     }
     if (interval === 5 && underCap && spreadTight) {
@@ -741,7 +744,7 @@ async function main() {
     log(`Sweep alert step: $${SWEEP_STEP_USD} above starting balance`);
     log(`Execution: ${IS_CANDIDATE_STACK ? 'collector-aligned taker-first (ask, capped)' : TAKER_FIRST ? 'TAKER-FIRST (ask, 10s)' : 'maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)'}`);
     log(IS_CANDIDATE_STACK
-        ? 'Families: 15m late_flip | 15m cross_0 | 15m price_55_65 | 5m spread_tight | ask cap 75¢'
+        ? 'Families: 15m late_flip | 15m price_55_65 | 5m spread_tight | ask cap 75¢ (cross_0 dropped 2026-04-19)'
         : 'Filters: 54-59¢ + 65-74¢ | sigs>=2 | no BTC 65-74¢ | HOLD all (rising dropped)');
     log(`Signals: flip60, odd_flips, US_eve, cross>=2, weekend, sweet_zone, accelerating, depth>=2, late_flip`);
     log('='.repeat(60));
