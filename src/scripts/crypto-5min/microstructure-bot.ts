@@ -53,16 +53,26 @@ function getArg(name: string, defaultVal: string): string {
 
 const STRATEGY = getArg('--strategy', 'v4');
 const IS_CANDIDATE_STACK = STRATEGY === 'candidate-stack';
+const IS_HIGH_WR = STRATEGY === 'high-wr';
 const RUN_MODE = IS_LIVE ? 'live' : 'dry-run';
-const BOT_STEM = IS_CANDIDATE_STACK ? 'candidate-stack-trades' : 'microstructure-trades';
-const DIAG_STEM = IS_CANDIDATE_STACK ? 'candidate-stack-diagnostics' : 'snap-diagnostics';
-const STRATEGY_STEM = IS_CANDIDATE_STACK ? 'candidate-stack' : 'v4';
+const BOT_STEM =
+    IS_CANDIDATE_STACK ? 'candidate-stack-trades' :
+    IS_HIGH_WR ? 'high-wr-trades' :
+    'microstructure-trades';
+const DIAG_STEM =
+    IS_CANDIDATE_STACK ? 'candidate-stack-diagnostics' :
+    IS_HIGH_WR ? 'high-wr-diagnostics' :
+    'snap-diagnostics';
+const STRATEGY_STEM =
+    IS_CANDIDATE_STACK ? 'candidate-stack' :
+    IS_HIGH_WR ? 'high-wr' :
+    'v4';
 const LEDGER_PATH = IS_LIVE ? `${BOT_STEM}.jsonl` : `${BOT_STEM}.dry-run.jsonl`;
 const LEDGER_DB_PATH = IS_LIVE ? `state/${BOT_STEM}.db` : `state/${BOT_STEM}.dry-run.db`;
 const SNAP_DIAGNOSTICS_PATH = IS_LIVE ? `${DIAG_STEM}.live.jsonl` : `${DIAG_STEM}.dry-run.jsonl`;
 const ABORT_LOG_PATH = IS_LIVE
-    ? `candidate-stack-aborts.live.jsonl`
-    : `candidate-stack-aborts.dry-run.jsonl`;
+    ? `${STRATEGY_STEM}-aborts.live.jsonl`
+    : `${STRATEGY_STEM}-aborts.dry-run.jsonl`;
 const PROCESS_LOCK_PATH = `state/microstructure-bot.${STRATEGY_STEM}.${RUN_MODE}.lock`;
 
 const TRADE_SIZE_USD = parseFloat(getArg('--size', '10'));
@@ -73,7 +83,7 @@ const MAX_TRADES = parseInt(getArg('--max-trades', '500'));
 
 // ── Constants ─────────────────────────────────────────────────────────
 
-const ENTRY_SECONDS_BEFORE = IS_CANDIDATE_STACK ? 33 : 30;
+const ENTRY_SECONDS_BEFORE = (IS_CANDIDATE_STACK || IS_HIGH_WR) ? 33 : 30;
 const MIN_BALANCE_USD = 3;
 // Pre-fill leader re-verification: wait this long after decision then re-read the
 // book before firing the taker order. Historical (pricing-data.jsonl) analysis
@@ -81,6 +91,20 @@ const MIN_BALANCE_USD = 3;
 // T-30, and those flip trades go from 66% WR → 39% WR. Abort rather than fire
 // into a flipped market.
 const PRE_FILL_VERIFY_DELAY_MS = 1500;
+
+// High-WR strategy configuration. At 90-93¢ entry, each flip or ask-slippage
+// event is catastrophic (one loss = ~7 wins), so the pre-fill verifier is
+// tighter than candidate-stack's:
+//   - Ask cap: 93¢ (vs 75¢ for candidate-stack)
+//   - Max ask slippage between T-33 decision and T-31 verify: 1¢
+//   - Max up-down gap shrinkage: 5¢ (imminent flip warning)
+const HIGH_WR_ASK_FLOOR = 0.90;
+const HIGH_WR_ASK_CAP = 0.93;
+// Median market volume threshold for "volume_high" filter. Computed from
+// 30-day collector data (Mar 20 - Apr 19 2026) across the candidate universe.
+const HIGH_WR_VOLUME_HIGH_THRESHOLD = 186.4;
+const HIGH_WR_MAX_ASK_SLIPPAGE = 0.01;
+const HIGH_WR_MAX_GAP_SHRINK = 0.05;
 
 const CRYPTOS = [
     { slug: 'btc', clSymbol: 'btc/usd' as const, name: 'BTC' },
@@ -680,6 +704,91 @@ function computeCandidateStackSignals(
     };
 }
 
+// High-WR strategy: buy 90-93¢ leader when ALL 3 other cryptos' prev 5m
+// resolutions match this leader AND market volume >= $186. On 30 days of
+// historical data this combination shows 97.6% WR, 5/5 walk-forward
+// positive, +$0.45/tr OOS. Small sample per day (~5 trades) but high edge
+// with uncorrelated mechanism from candidate-stack.
+function computeHighWrSignals(
+    snapT33: BookSnapshot,
+    snapT60: BookSnapshot | null,
+    snapT120: BookSnapshot | null,
+    snapT240: BookSnapshot | null,
+    prevResolution: 'UP' | 'DOWN' | 'UNKNOWN' | '',
+    prevResolutions: Record<string, 'UP' | 'DOWN' | 'UNKNOWN'>,
+    crypto: string,
+    interval: number,
+    marketVolume: number,
+): EntrySignals {
+    const leaderSide = snapT33.leader as 'UP' | 'DOWN';
+    const leaderBid = leaderSide === 'UP' ? snapT33.upBid : snapT33.downBid;
+    const leaderAsk = leaderSide === 'UP' ? snapT33.upAsk : snapT33.downAsk;
+    const leaderTokenId = leaderSide === 'UP' ? snapT33.upToken : snapT33.downToken;
+    const leaderAskSize = leaderSide === 'UP' ? snapT33.upAskSize : snapT33.downAskSize;
+    const leaderAskDepth = leaderSide === 'UP' ? snapT33.upAskDepth : snapT33.downAskDepth;
+    const leaderBidDepth = leaderSide === 'UP' ? snapT33.upBidDepth : snapT33.downBidDepth;
+
+    const prevMatchesFav = prevResolution === leaderSide;
+    let leaderRising: boolean | null = null;
+    if (snapT120) {
+        const leaderBidT120 = leaderSide === 'UP' ? snapT120.upBid : snapT120.downBid;
+        if (leaderBidT120 > 0) leaderRising = leaderBid > leaderBidT120;
+    }
+    const flip60 = snapT60 !== null && snapT60.leader !== 'TIE' && snapT60.leader !== leaderSide;
+    const hourUTC = new Date().getUTCHours();
+    const isUSEve = hourUTC >= 18 || hourUTC < 2;
+    const dow = new Date().getUTCDay();
+    const isWeekend = dow === 0 || dow === 6;
+    let crossSame = 0;
+    for (const [c, res] of Object.entries(prevResolutions)) {
+        if (c !== crypto && res === leaderSide) crossSame++;
+    }
+    const strongDepth = leaderAskDepth > 0 && (leaderBidDepth / leaderAskDepth) >= 2.0;
+    let lateFlip = false;
+    if (snapT240 && snapT240.leader !== 'TIE') lateFlip = snapT240.leader !== leaderSide;
+
+    const accounts: string[] = [];
+    const followerBid = leaderSide === 'UP' ? snapT33.downBid : snapT33.upBid;
+    const isTwoSided = followerBid >= 0.01 && leaderAsk < 0.99 && leaderAsk > 0.03;
+    const inBand = leaderAsk >= HIGH_WR_ASK_FLOOR && leaderAsk < HIGH_WR_ASK_CAP;
+    const crossAll = crossSame === 3;
+    const volumeHigh = marketVolume >= HIGH_WR_VOLUME_HIGH_THRESHOLD;
+
+    let action: 'TRADE' | 'SKIP' = 'SKIP';
+    let reason = '';
+
+    if (!isTwoSided) {
+        reason = 'one-sided';
+    } else if (!inBand) {
+        reason = `ask ${(leaderAsk * 100).toFixed(0)}¢ outside ${Math.round(HIGH_WR_ASK_FLOOR * 100)}-${Math.round(HIGH_WR_ASK_CAP * 100)}¢`;
+    } else if (!crossAll) {
+        reason = `cross_agree=${crossSame}/3 (need all)`;
+    } else if (!volumeHigh) {
+        reason = `volume $${marketVolume.toFixed(0)} < $${HIGH_WR_VOLUME_HIGH_THRESHOLD.toFixed(0)}`;
+    } else {
+        accounts.push('cross_all', 'volume_high', '90_93');
+        action = 'TRADE';
+        reason = 'cross_all+vol_high+90_93';
+    }
+
+    if (action === 'TRADE') {
+        const sharesNeeded = Math.floor(TRADE_SIZE_USD / leaderAsk);
+        if (leaderAskDepth < sharesNeeded) {
+            action = 'SKIP';
+            reason = `thin(${leaderAskDepth.toFixed(0)}sh total < ${sharesNeeded}sh needed)`;
+        }
+    }
+
+    return {
+        leaderSide, leaderBid, leaderAsk, leaderTokenId, leaderAskSize, leaderAskDepth,
+        prevMatchesFav, leaderRising,
+        flip60, isUSEve, isWeekend, crossSame,
+        sweetZone: false, accelerating: false, strongDepth, lateFlip,
+        signalCount: accounts.length, accounts,
+        action, reason,
+    };
+}
+
 // ── Auto-Redeem ───────────────────────────────────────────────────────
 
 async function redeemPosition(conditionId: string, viemWalletClient: any, viemPublicClient: any): Promise<boolean> {
@@ -737,15 +846,17 @@ async function main() {
     process.on('unhandledRejection', () => { cleanup(); process.exit(1); });
 
     log('='.repeat(60));
-    log(`MICROSTRUCTURE BOT — ${IS_CANDIDATE_STACK ? 'Candidate Stack' : 'v4 9-Signal System'}`);
+    log(`MICROSTRUCTURE BOT — ${IS_HIGH_WR ? 'High-WR (cross_all + vol_high @ 90-93¢)' : IS_CANDIDATE_STACK ? 'Candidate Stack' : 'v4 9-Signal System'}`);
     log(`Mode: ${IS_LIVE ? '🔴 LIVE TRADING 🔴' : 'DRY RUN'}`);
     log(`Strategy: ${STRATEGY_STEM} | run mode: ${RUN_MODE} | ledger=${LEDGER_PATH} | diagnostics=${SNAP_DIAGNOSTICS_PATH}`);
     log(`Trade size: $${TRADE_SIZE_USD} | Max loss: $${MAX_LOSS_USD} | Trail: $${TRAIL_USD} from peak | Max trades: ${MAX_TRADES}`);
     log(`Sweep alert step: $${SWEEP_STEP_USD} above starting balance`);
-    log(`Execution: ${IS_CANDIDATE_STACK ? 'collector-aligned taker-first (ask, capped)' : TAKER_FIRST ? 'TAKER-FIRST (ask, 10s)' : 'maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)'}`);
-    log(IS_CANDIDATE_STACK
-        ? 'Families: 15m late_flip | 15m price_55_65 | 5m spread_tight | ask cap 75¢ (cross_0 dropped 2026-04-19)'
-        : 'Filters: 54-59¢ + 65-74¢ | sigs>=2 | no BTC 65-74¢ | HOLD all (rising dropped)');
+    log(`Execution: ${(IS_CANDIDATE_STACK || IS_HIGH_WR) ? 'collector-aligned taker-first (ask, capped)' : TAKER_FIRST ? 'TAKER-FIRST (ask, 10s)' : 'maker-first (bid+1¢, 12s) → taker fallback (ask, 10s)'}`);
+    log(IS_HIGH_WR
+        ? `Filter: leader ask 90-93¢ + cross_agree_all (3/3) + volume >= $${HIGH_WR_VOLUME_HIGH_THRESHOLD.toFixed(0)} | cap 93¢ | slip ≤ 1¢ | gap-shrink ≤ 5¢`
+        : IS_CANDIDATE_STACK
+            ? 'Families: 15m late_flip | 15m price_55_65 | 5m spread_tight | ask cap 75¢ (cross_0 dropped 2026-04-19)'
+            : 'Filters: 54-59¢ + 65-74¢ | sigs>=2 | no BTC 65-74¢ | HOLD all (rising dropped)');
     log(`Signals: flip60, odd_flips, US_eve, cross>=2, weekend, sweet_zone, accelerating, depth>=2, late_flip`);
     log('='.repeat(60));
 
@@ -987,7 +1098,7 @@ async function main() {
                 const parallelSnaps = await Promise.all(soonestMarkets.map(({ market, crypto, interval }) =>
                     takeBookSnapshot(market, {
                         slug: market.slug,
-                        phase: IS_CANDIDATE_STACK ? 'T-33-entry' : 'T-30-entry',
+                        phase: (IS_CANDIDATE_STACK || IS_HIGH_WR) ? 'T-33-entry' : 'T-30-entry',
                         endMs: new Date(market.endDate).getTime(),
                     }).then(snap => ({ market, crypto, interval, snap }))
             ));
@@ -1009,9 +1120,12 @@ async function main() {
                 // Use prev resolution for this crypto (5m resolution drives the signal)
                 const prevRes = prevResolutions[crypto.name] || 'UNKNOWN';
 
-                const signals = IS_CANDIDATE_STACK
-                    ? computeCandidateStackSignals(snapT30, snapT60, snapT120, snapT240, prevRes, prevResolutions, crypto.name, interval)
-                    : computeSignals(snapT30, snapT60, snapT120, snapT240, prevRes, prevResolutions, crypto.name, interval);
+                const marketVolume = Number(market.volume) || 0;
+                const signals = IS_HIGH_WR
+                    ? computeHighWrSignals(snapT30, snapT60, snapT120, snapT240, prevRes, prevResolutions, crypto.name, interval, marketVolume)
+                    : IS_CANDIDATE_STACK
+                        ? computeCandidateStackSignals(snapT30, snapT60, snapT120, snapT240, prevRes, prevResolutions, crypto.name, interval)
+                        : computeSignals(snapT30, snapT60, snapT120, snapT240, prevRes, prevResolutions, crypto.name, interval);
 
                 // Log signal details
                 const sideStr = `${signals.leaderSide} leads @${(signals.leaderAsk * 100).toFixed(0)}¢`;
@@ -1021,17 +1135,75 @@ async function main() {
 
                 if (signals.action !== 'TRADE') continue;
 
-                const targetEntryPrice = IS_CANDIDATE_STACK
+                const targetEntryPrice = (IS_CANDIDATE_STACK || IS_HIGH_WR)
                     ? signals.leaderAsk
                     : Math.min(signals.leaderBid + 0.01, signals.leaderAsk);
-                const maxTakerPrice = IS_CANDIDATE_STACK ? 0.75 : 0.75;
+                const maxTakerPrice = IS_HIGH_WR ? HIGH_WR_ASK_CAP : 0.75;
                 log(
-                    IS_CANDIDATE_STACK
+                    (IS_CANDIDATE_STACK || IS_HIGH_WR)
                         ? `  >> BUY ${signals.leaderSide}: ${crypto.name} ${interval}m | ask=${(signals.leaderAsk * 100).toFixed(0)}¢ taker-first [${signals.reason}]`
                         : `  >> BUY ${signals.leaderSide}: ${crypto.name} ${interval}m | ask=${(signals.leaderAsk * 100).toFixed(0)}¢ maker=${(targetEntryPrice * 100).toFixed(0)}¢`,
                 );
 
+                // Pre-fill verification runs in BOTH live and dry-run for
+                // candidate-stack/high-wr so dry-run ledgers reflect the actual
+                // filtered-out trades. For high-wr we also enforce a tighter
+                // slippage budget (since a 6¢ ask move at 87¢ kills edge even
+                // without a flip) and abort on shrinking up-down gap (early
+                // warning of imminent flip).
                 let execResult;
+                if (IS_CANDIDATE_STACK || IS_HIGH_WR) {
+                    await new Promise(r => setTimeout(r, PRE_FILL_VERIFY_DELAY_MS));
+                    const [upBookNow, downBookNow] = await Promise.all([
+                        getBookInfo(snapT30.upToken),
+                        getBookInfo(snapT30.downToken),
+                    ]);
+                    const newLeaderSide: 'UP' | 'DOWN' | 'TIE' =
+                        upBookNow.bestBid > downBookNow.bestBid ? 'UP' :
+                        downBookNow.bestBid > upBookNow.bestBid ? 'DOWN' : 'TIE';
+                    const newLeaderAsk = signals.leaderSide === 'UP' ? upBookNow.bestAsk : downBookNow.bestAsk;
+                    const decideGap = Math.abs(snapT30.upBid - snapT30.downBid);
+                    const verifyGap = Math.abs(upBookNow.bestBid - downBookNow.bestBid);
+                    const gapShrink = decideGap - verifyGap;
+
+                    const flipped = newLeaderSide !== signals.leaderSide;
+                    const aboveCap = newLeaderAsk > maxTakerPrice;
+                    const slipped = IS_HIGH_WR && newLeaderAsk > signals.leaderAsk + HIGH_WR_MAX_ASK_SLIPPAGE;
+                    const gapShrunk = IS_HIGH_WR && gapShrink > HIGH_WR_MAX_GAP_SHRINK;
+
+                    if (flipped || aboveCap || slipped || gapShrunk) {
+                        const reason = flipped
+                            ? `leader flipped ${signals.leaderSide}→${newLeaderSide} (upBid=${upBookNow.bestBid.toFixed(2)} downBid=${downBookNow.bestBid.toFixed(2)})`
+                            : aboveCap
+                                ? `ask moved above ${(maxTakerPrice * 100).toFixed(0)}¢ cap (${(newLeaderAsk * 100).toFixed(0)}¢)`
+                                : slipped
+                                    ? `ask slipped ${((newLeaderAsk - signals.leaderAsk) * 100).toFixed(1)}¢ (decide ${(signals.leaderAsk * 100).toFixed(0)}¢ → verify ${(newLeaderAsk * 100).toFixed(0)}¢, max ${(HIGH_WR_MAX_ASK_SLIPPAGE * 100).toFixed(0)}¢)`
+                                    : `gap shrank ${(gapShrink * 100).toFixed(1)}¢ (decide ${(decideGap * 100).toFixed(0)}¢ → verify ${(verifyGap * 100).toFixed(0)}¢, max ${(HIGH_WR_MAX_GAP_SHRINK * 100).toFixed(0)}¢)`;
+                        log(`    ABORT (pre-fill verify): ${reason}`);
+                        try {
+                            appendFileSync(ABORT_LOG_PATH, JSON.stringify({
+                                timestamp: new Date().toISOString(),
+                                strategy: STRATEGY_STEM,
+                                runMode: RUN_MODE,
+                                slug: market.slug, crypto: crypto.name, interval,
+                                decisionSide: signals.leaderSide,
+                                decisionAsk: signals.leaderAsk,
+                                decideGap,
+                                reverifySide: newLeaderSide,
+                                reverifyUpBid: upBookNow.bestBid,
+                                reverifyDownBid: downBookNow.bestBid,
+                                reverifyLeaderAsk: newLeaderAsk,
+                                verifyGap,
+                                gapShrink,
+                                flipped, aboveCap, slipped, gapShrunk,
+                                reason,
+                            }) + '\n');
+                        } catch {}
+                        continue;
+                    }
+                    log(`    Pre-fill OK: ${signals.leaderSide} leads (upBid=${upBookNow.bestBid.toFixed(2)} downBid=${downBookNow.bestBid.toFixed(2)}) ask=${(newLeaderAsk * 100).toFixed(0)}¢${IS_HIGH_WR ? ` gap=${(verifyGap * 100).toFixed(0)}¢` : ''}`);
+                }
+
                 if (IS_LIVE && executor) {
                     const tokenId = signals.leaderTokenId;
                     const mutexKey = `${tokenId}:${soonestEnd}`;
@@ -1039,45 +1211,6 @@ async function main() {
                         log(`    SKIP: already placed on ${crypto.name} ${interval}m this candle (mutex hit)`);
                         continue;
                     }
-
-                    // Pre-fill verification: wait, then re-read the book to confirm the
-                    // leader side and ask haven't flipped. Without this, ~11% of trades in
-                    // our filter universe fire into a flipped market and bleed −27pp WR.
-                    if (IS_CANDIDATE_STACK) {
-                        await new Promise(r => setTimeout(r, PRE_FILL_VERIFY_DELAY_MS));
-                        const [upBookNow, downBookNow] = await Promise.all([
-                            getBookInfo(snapT30.upToken),
-                            getBookInfo(snapT30.downToken),
-                        ]);
-                        const newLeaderSide: 'UP' | 'DOWN' | 'TIE' =
-                            upBookNow.bestBid > downBookNow.bestBid ? 'UP' :
-                            downBookNow.bestBid > upBookNow.bestBid ? 'DOWN' : 'TIE';
-                        const newLeaderAsk = signals.leaderSide === 'UP' ? upBookNow.bestAsk : downBookNow.bestAsk;
-                        const flipped = newLeaderSide !== signals.leaderSide;
-                        const aboveCap = newLeaderAsk > maxTakerPrice;
-                        if (flipped || aboveCap) {
-                            const reason = flipped
-                                ? `leader flipped ${signals.leaderSide}→${newLeaderSide} (upBid=${upBookNow.bestBid.toFixed(2)} downBid=${downBookNow.bestBid.toFixed(2)})`
-                                : `ask moved above ${(maxTakerPrice * 100).toFixed(0)}¢ cap (${(newLeaderAsk * 100).toFixed(0)}¢)`;
-                            log(`    ABORT (pre-fill verify): ${reason}`);
-                            try {
-                                appendFileSync(ABORT_LOG_PATH, JSON.stringify({
-                                    timestamp: new Date().toISOString(),
-                                    slug: market.slug, crypto: crypto.name, interval,
-                                    decisionSide: signals.leaderSide,
-                                    decisionAsk: signals.leaderAsk,
-                                    reverifySide: newLeaderSide,
-                                    reverifyUpBid: upBookNow.bestBid,
-                                    reverifyDownBid: downBookNow.bestBid,
-                                    reverifyLeaderAsk: newLeaderAsk,
-                                    reason,
-                                }) + '\n');
-                            } catch {}
-                            continue;
-                        }
-                        log(`    Pre-fill OK: ${signals.leaderSide} still leading (upBid=${upBookNow.bestBid.toFixed(2)} downBid=${downBookNow.bestBid.toFixed(2)}) ask=${(newLeaderAsk * 100).toFixed(0)}¢`);
-                    }
-
                     placedThisCycle.add(mutexKey);
                     execResult = await executor.executeWithFallback(
                         tokenId, targetEntryPrice, TRADE_SIZE_USD,
@@ -1090,7 +1223,7 @@ async function main() {
                     if (execResult.status === 'ERROR') log(`    Error: ${execResult.error}`);
                 } else {
                     const shares = Math.floor(TRADE_SIZE_USD / targetEntryPrice);
-                    const executionLabel = IS_CANDIDATE_STACK ? 'collector-aligned ask' : 'maker preview';
+                    const executionLabel = (IS_CANDIDATE_STACK || IS_HIGH_WR) ? 'collector-aligned ask' : 'maker preview';
                     log(`    DRY RUN: would buy ${shares} shares of ${signals.leaderSide} @${(targetEntryPrice * 100).toFixed(0)}¢ ($${(shares * targetEntryPrice).toFixed(2)}) [${executionLabel}]`);
                     execResult = {
                         status: 'FILLED' as const,
